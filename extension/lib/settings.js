@@ -12,7 +12,7 @@ export const DEFAULT_PREFS = {
   source: 'en',
   target: 'ru',
   draftEngine: 'chrome',   // chrome | yandex | deepseek | off
-  finalEngine: 'deepseek', // deepseek | yandex | chrome
+  finalEngine: 'yandex',   // yandex | deepseek | chrome
   tts: false,
   ttsProvider: 'browser',  // browser | yandex
   voice: '',

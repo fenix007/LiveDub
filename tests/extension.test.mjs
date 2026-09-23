@@ -102,3 +102,18 @@ test('extension ships the same PCM worklet as the web prototype', () => {
   const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
   assert.equal(read('../extension/pcm-worklet.js'), read('../public/pcm-worklet.js'));
 });
+
+test('latency stats keep a sliding window per engine', async () => {
+  const { createLatencyStats } = await import('../extension/lib/stats.js');
+  const stats = createLatencyStats(3);
+  stats.record('yandex', 'draft', 100, true);
+  stats.record('yandex', 'final', 300, false);
+  stats.record('yandex', 'final', 200, true);
+  stats.record('yandex', 'final', 400, true);
+  stats.record('deepseek', 'final', 900, true);
+  const { all, final, draft } = stats.summary('yandex');
+  assert.deepEqual(all, { count: 3, errors: 1, p50Ms: 300, p95Ms: 400 });
+  assert.equal(final.count, 3);
+  assert.equal(draft.count, 0);
+  assert.equal(stats.summary('deepseek').all.p50Ms, 900);
+});

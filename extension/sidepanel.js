@@ -5,6 +5,7 @@ import { joinText, stableWords, wordCount } from './lib/text.js';
 import { openDeepgram, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
 import { startTabAudio } from './lib/capture.js';
 import { createSpeech } from './lib/speech.js';
+import { createLatencyStats } from './lib/stats.js';
 
 const $ = (id) => document.getElementById(id);
 const log = $('log'), statusEl = $('status');
@@ -25,6 +26,7 @@ let phrase = null;
 let history = [];         // последние оригиналы — контекст для LLM
 let activeRemoteDrafts = 0;
 let keepAliveTimer = null, keepAliveSocket = null;
+const latency = createLatencyStats();
 
 const setStatus = (text, cls = '') => { statusEl.textContent = text; statusEl.className = cls; };
 const hasTranslator = 'Translator' in self;
@@ -177,28 +179,59 @@ async function createChromeTranslator(sourceLanguage, targetLanguage) {
   });
 }
 
-async function engineTranslate(engine, text, context) {
+async function engineTranslate(engine, text, context, kind) {
   const input = { text, context, source: prefs.source, target: prefs.target };
   if (engine === 'chrome') {
     const translator = await translatorPromise;
     if (!translator) throw new Error('Chrome Translator не запущен');
     return translator.translate(text);
   }
-  if (engine === 'deepseek') return translateDeepSeek({ key: keys.deepseekKey, model: keys.deepseekModel }, input);
-  if (engine === 'yandex') return translateYandex({ key: keys.yandexKey, folderId: keys.yandexFolderId }, input);
+  if (engine === 'deepseek') {
+    return timed(engine, kind, translateDeepSeek({ key: keys.deepseekKey, model: keys.deepseekModel }, input));
+  }
+  if (engine === 'yandex') {
+    return timed(engine, kind, translateYandex({ key: keys.yandexKey, folderId: keys.yandexFolderId }, input));
+  }
   throw new Error(`Неизвестный движок: ${engine}`);
 }
 
-// Черновик и финал переводят разные движки: голос продолжает черновой движок,
-// а на экране финальную строку заменяет перевод финального движка.
+// Задержки облачных движков, чтобы сравнивать Yandex и DeepSeek на реальных репликах.
+async function timed(engine, kind, request) {
+  const started = performance.now();
+  try {
+    const result = await request;
+    latency.record(engine, kind, performance.now() - started, true);
+    return result;
+  } catch (error) {
+    latency.record(engine, kind, performance.now() - started, false);
+    throw error;
+  } finally {
+    showLatency();
+  }
+}
+
+function showLatency() {
+  const seconds = (ms) => ms == null ? '—' : `${(ms / 1000).toFixed(1)} с`;
+  const names = { yandex: 'Yandex Translate', deepseek: 'DeepSeek' };
+  $('metrics').textContent = Object.entries(names).map(([engine, name]) => {
+    const { all, final } = latency.summary(engine);
+    return all.count ? `${name} · ${all.count} запросов: p50 ${seconds(all.p50Ms)}, p95 ${seconds(all.p95Ms)}, ` +
+      `ошибок: ${all.errors}. Финальные: p95 ${seconds(final.p95Ms)}.` : '';
+  }).filter(Boolean).join(' ');
+}
+
+// Черновик и финал переводят разные движки. Браузерный голос продолжает черновой
+// движок, а на экране финальную строку заменяет перевод финального движка.
+// SpeechKit в этом режиме озвучивает только финал — тот же текст, что на экране.
 const splitVoice = () => prefs.draftEngine !== 'off' && prefs.draftEngine !== prefs.finalEngine;
+const yandexVoice = () => prefs.ttsProvider === 'yandex';
 
 async function translate(text, context, kind) {
   const engine = kind === 'draft' ? prefs.draftEngine : prefs.finalEngine;
   try {
-    return await engineTranslate(engine, text, context);
+    return await engineTranslate(engine, text, context, kind);
   } catch (error) {
-    if (kind === 'final' && splitVoice()) return engineTranslate(prefs.draftEngine, text, context);
+    if (kind === 'final' && splitVoice()) return engineTranslate(prefs.draftEngine, text, context, 'final');
     throw error;
   }
 }
@@ -230,7 +263,9 @@ function renderTranslation(state, translated, elapsed, kind, sourceText) {
   el.appendChild(ms);
   scrollDown();
   showSubtitle(state, translated, final);
-  if (!final || !splitVoice() || state.ttsUseServerFinal) speech.speak(state, translated, final);
+  if (!splitVoice() || state.ttsUseServerFinal || (yandexVoice() ? final : !final)) {
+    speech.speak(state, translated, final);
+  }
 }
 
 function requestTranslation(state, text) {
@@ -308,10 +343,10 @@ function flush() {
   if (splitVoice()) {
     // Даже при совпадении текста с черновиком нужен ответ финального движка.
     requestTranslation(state, text);
-    if (prefs.tts && speech.ready()) {
+    if (prefs.tts && speech.ready() && !yandexVoice()) {
       (async () => {
         try {
-          const voiced = await engineTranslate(prefs.draftEngine, text, state.context);
+          const voiced = await engineTranslate(prefs.draftEngine, text, state.context, 'final');
           if (!voiced?.trim()) throw new Error('Пустой перевод для озвучки');
           speech.speak(state, voiced, true);
         } catch {
