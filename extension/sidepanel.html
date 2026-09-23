@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveDub</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<header>
+  <div class="grid">
+    <label>С языка<select id="source">
+      <option value="en">English</option><option value="ru">Русский</option>
+      <option value="de">Deutsch</option><option value="fr">Français</option><option value="es">Español</option>
+    </select></label>
+    <label>На язык<select id="target">
+      <option value="ru">Русский</option><option value="en">English</option>
+      <option value="de">Deutsch</option><option value="fr">Français</option><option value="es">Español</option>
+    </select></label>
+    <label>Черновик<select id="draftEngine">
+      <option value="chrome">Chrome on-device</option>
+      <option value="yandex">Yandex Translate</option>
+      <option value="deepseek">DeepSeek</option>
+      <option value="off">Не переводить</option>
+    </select></label>
+    <label>Финал<select id="finalEngine">
+      <option value="deepseek">DeepSeek</option>
+      <option value="yandex">Yandex Translate</option>
+      <option value="chrome">Chrome on-device</option>
+    </select></label>
+    <label>Озвучка<select id="ttsProvider">
+      <option value="browser">Браузер</option>
+      <option value="yandex">Yandex SpeechKit</option>
+    </select></label>
+    <label>Голос<select id="voice"><option value="">Авто</option></select></label>
+  </div>
+  <div class="toggles">
+    <label><input id="tts" type="checkbox"> Озвучивать</label>
+    <label><input id="subtitles" type="checkbox"> Субтитры на странице</label>
+    <label title="Громкость оригинала, пока звучит перевод">Оригинал при озвучке
+      <input id="duck" type="range" min="0" max="1" step="0.05"></label>
+  </div>
+  <div class="actions">
+    <button id="start" class="primary">Переводить эту вкладку</button>
+    <button id="stop" disabled>Стоп</button>
+    <button id="options" class="link" title="Ключи Deepgram, DeepSeek, Yandex">Ключи API</button>
+  </div>
+  <div id="status" role="status">готово</div>
+  <div id="ttsMetrics" aria-live="polite"></div>
+</header>
+<main id="log"></main>
+<script type="module" src="sidepanel.js"></script>
+</body>
+</html>

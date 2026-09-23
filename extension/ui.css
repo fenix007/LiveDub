@@ -1,0 +1,41 @@
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --line: #dfe3ea; --text: #1b1f27; --muted: #667085;
+  --accent: #2f6bff; --ok: #12925c; --err: #d93838; --field: #ffffff;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e8eaf0; --muted: #8a93a6;
+    --accent: #4f8cff; --ok: #3ecf8e; --err: #ff6b6b; --field: #0f1115;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { position: sticky; top: 0; z-index: 1; background: var(--panel); border-bottom: 1px solid var(--line); padding: 12px; display: grid; gap: 10px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+label { display: grid; gap: 3px; color: var(--muted); font-size: 12px; }
+.toggles { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.toggles label { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 13px; }
+.toggles input[type=range] { width: 80px; }
+select, button, input[type=text], input[type=password] {
+  background: var(--field); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+  padding: 6px 8px; font: inherit; min-width: 0; width: 100%;
+}
+button { cursor: pointer; width: auto; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.link { border: 0; background: none; color: var(--accent); padding: 6px 4px; margin-left: auto; }
+button:disabled, select:disabled { opacity: .45; cursor: default; }
+.actions { display: flex; gap: 8px; align-items: center; }
+#status { color: var(--muted); font-size: 12px; }
+#status.live { color: var(--ok); } #status.err { color: var(--err); }
+#ttsMetrics { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#ttsMetrics:empty { display: none; }
+main { padding: 4px 12px 24px; }
+.row { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.src { color: var(--muted); font-size: 12px; }
+.tr { font-size: 16px; margin-top: 2px; }
+.tr.pending { color: var(--muted); font-style: italic; font-size: 14px; }
+.row.draft .src, .row.draft .tr { opacity: .7; }
+.row.draft .tr:not(.pending)::after { content: ' · черновик'; color: var(--muted); font-size: 11px; }
+.ms { color: var(--muted); font-size: 11px; margin-left: 6px; font-variant-numeric: tabular-nums; }

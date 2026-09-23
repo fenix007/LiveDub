@@ -1,0 +1,11 @@
+{
+  "name": "tab-live-translate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Минимальный захват звука вкладки + live-перевод (Deepgram + Chrome Translator API / LLM)",
+  "engines": { "node": ">=20.6" },
+  "scripts": {
+    "start": "node --env-file=.env server.js"
+  }
+}

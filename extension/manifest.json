@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "LiveDub — живой перевод и озвучка любой вкладки",
+  "short_name": "LiveDub",
+  "version": "0.1.0",
+  "description": "Звук вкладки → Deepgram → перевод Chrome / DeepSeek / Yandex Translate → субтитры и озвучка.",
+  "minimum_chrome_version": "116",
+  "permissions": ["tabCapture", "sidePanel", "storage", "scripting", "activeTab"],
+  "host_permissions": [
+    "https://api.deepgram.com/*",
+    "https://api.deepseek.com/*",
+    "https://translate.api.cloud.yandex.net/*",
+    "https://tts.api.cloud.yandex.net/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "LiveDub: открыть панель перевода" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "options_ui": { "page": "options.html", "open_in_tab": true }
+}

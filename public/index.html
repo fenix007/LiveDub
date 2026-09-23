@@ -1,0 +1,858 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab → Live Translate</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e8eaf0; --muted:#8a93a6; --accent:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { position:sticky; top:0; background:var(--panel); border-bottom:1px solid var(--line); padding:14px 24px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; z-index:1; }
+  h1 { font-size:16px; margin:0 12px 0 0; font-weight:600; }
+  select, button { background:#0f1115; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 10px; font:inherit; }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  #status { margin-left:auto; color:var(--muted); font-size:13px; }
+  #status.live { color:var(--ok); } #status.err { color:var(--err); }
+  main { max-width:900px; margin:0 auto; padding:24px; }
+  .hint { color:var(--muted); font-size:13px; margin:0 0 20px; }
+  #metrics, #ttsMetrics { color:var(--muted); font-size:12px; margin:-8px 0 14px; font-variant-numeric:tabular-nums; }
+  .row { padding:12px 0; border-bottom:1px solid var(--line); }
+  .src { color:var(--muted); font-size:13px; }
+  .tr { font-size:19px; margin-top:2px; }
+  .tr.pending { color:var(--muted); font-style:italic; font-size:15px; }
+  .row.draft .src, .row.draft .tr { opacity:.7; }
+  .row.draft .tr:not(.pending)::after { content:' · черновик'; color:var(--muted); font-size:11px; }
+  .ms { color:var(--muted); font-size:11px; margin-left:8px; font-variant-numeric:tabular-nums; }
+  #voice { max-width:180px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Вкладка → перевод</h1>
+  <label>С&nbsp;<select id="src">
+    <option value="en" selected>English</option><option value="ru">Русский</option>
+    <option value="de">Deutsch</option><option value="fr">Français</option><option value="es">Español</option>
+  </select></label>
+  <label>на&nbsp;<select id="tgt">
+    <option value="ru" selected>Русский</option><option value="en">English</option>
+    <option value="de">Deutsch</option><option value="fr">Français</option><option value="es">Español</option>
+  </select></label>
+  <label>движок&nbsp;<select id="mode">
+    <option value="chrome" selected>Chrome on-device</option>
+    <option value="hybrid">Chrome черновик + Gemini финал</option>
+    <option value="gemini">Gemini (сервер)</option>
+    <option value="hybridDeepseek">Chrome черновик + DeepSeek финал</option>
+    <option value="deepseek">DeepSeek (сервер)</option>
+    <option value="hybridYandex">Chrome черновик + Yandex финал</option>
+    <option value="yandex">Yandex Translate (сервер)</option>
+    <option value="llm">LLM (сервер)</option>
+  </select></label>
+  <label><input id="tts" type="checkbox"> Озвучивать перевод</label>
+  <label>озвучка&nbsp;<select id="ttsProvider"><option value="browser">Браузер</option><option value="yandex" disabled>Yandex SpeechKit</option></select></label>
+  <label>голос&nbsp;<select id="voice"><option value="">Авто</option></select></label>
+  <button id="start" class="primary">Захватить вкладку</button>
+  <button id="stop" disabled>Стоп</button>
+  <span id="status">готово</span>
+</header>
+<main>
+  <p class="hint">Нажмите «Захватить вкладку», выберите вкладку во вкладке «Вкладка Chrome» и <b>включите «Также поделиться звуком вкладки»</b>. Черновой перевод появится во время речи; включите озвучивание, чтобы слышать его по мере появления.</p>
+  <div id="metrics"></div>
+  <div id="ttsMetrics" aria-live="polite"></div>
+  <div id="log"></div>
+</main>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const log = $('log'), statusEl = $('status');
+
+let stream, audioContext, audioSource, lowpass1, lowpass2, audioWorklet, silentSink, ws, translatorPromise;
+let keepAliveTimer, keepAliveSocket;
+let captureGeneration = 0;
+let buffer = [];          // финальные сегменты текущей фразы
+let latestInterim = '';
+let phrase = null;
+let history = [];         // последние оригиналы — контекст для LLM
+let cfg = { llm: false, gemini: false, deepseek: false, yandexTranslate: false };
+let activeServerDrafts = 0;
+let speechQueue = [];
+let speechActive = null;
+let speechQueueEpoch = 0;
+let nextSpeechPhraseId = 0;
+let speechRestartTimer = null;
+const speechStats = { starts: [], prefixMismatch: 0, backlogDropped: 0, errors: 0 };
+let speechNotice = '';
+const DRAFT_INTERVAL_MS = 1200;
+const DRAFT_MIN_WORDS = 3;
+const DRAFT_NEW_WORDS = 3;
+
+const setStatus = (text, cls = '') => { statusEl.textContent = text; statusEl.className = cls; };
+
+// Браузерный синтез речи: не ждёт финала LLM и не требует отдельного ключа.
+const speechAvailable = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
+const yandexVoices = { marina: 'Марина', alena: 'Алёна', jane: 'Джейн', filipp: 'Филипп', ermil: 'Ермил', zahar: 'Захар' };
+const yandexSelected = () => $('ttsProvider').value === 'yandex';
+const speechReady = () => yandexSelected() ? cfg.yandexTts && $('tgt').value === 'ru' : speechAvailable;
+if (!speechAvailable) { $('tts').disabled = true; $('voice').disabled = true; }
+
+function matchingVoices() {
+  if (!speechAvailable) return [];
+  const target = $('tgt').value.toLowerCase();
+  return window.speechSynthesis.getVoices()
+    .filter((voice) => voice.lang.toLowerCase().split(/[-_]/)[0] === target)
+    .sort((a, b) => Number(b.localService) - Number(a.localService));
+}
+
+function populateVoices() {
+  const previous = $('voice').value;
+  $('voice').innerHTML = '<option value="">Авто</option>';
+  const voices = yandexSelected() ? Object.entries(yandexVoices).map(([voiceURI, name]) => ({ voiceURI, name })) : matchingVoices();
+  for (const voice of voices) {
+    const option = document.createElement('option');
+    option.value = voice.voiceURI;
+    option.textContent = `${voice.name}${voice.localService ? ' · локальный' : ''}`;
+    $('voice').appendChild(option);
+  }
+  $('voice').value = voices.some((voice) => voice.voiceURI === previous) ? previous : '';
+}
+
+function cancelSpeech() {
+  ++speechQueueEpoch;
+  if (speechActive) {
+    logSpeech('cancel', speechActive.state, { playMs: speechActive.startedAt == null ? null : performance.now() - speechActive.startedAt });
+    // Отменённая реплика могла прозвучать частично: лучше пропустить хвост, чем повторить начало.
+    if (speechActive.started) speechActive.state.ttsWords = speechActive.spokenWords;
+    clearTimeout(speechActive.watchdog);
+    speechActive.controller?.abort();
+    speechActive.audio?.pause();
+    if (speechActive.audioUrl) URL.revokeObjectURL(speechActive.audioUrl);
+  }
+  if (speechRestartTimer) clearTimeout(speechRestartTimer);
+  speechRestartTimer = null;
+  speechActive = null;
+  speechQueue = [];
+  if (speechAvailable) window.speechSynthesis.cancel();
+}
+
+const speechWords = (text) => text.trim().split(/\s+/).filter(Boolean);
+const comparableWord = (word) => word.normalize('NFC').toLocaleLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+const speechSeconds = (text) => text.length / 15;
+const speechBacklogSeconds = () =>
+  (speechActive ? Math.max(0, speechSeconds(speechActive.text) -
+    (speechActive.startedAt == null ? 0 : (performance.now() - speechActive.startedAt) / 1000)) : 0) +
+  speechQueue.reduce((sum, state) => sum + speechSeconds(
+    speechWords(state.ttsCandidate).slice(state.ttsWords.length).join(' ')), 0);
+
+function logSpeech(event, state, extra = {}) {
+  if (typeof navigator === 'undefined' || !navigator.sendBeacon) return;
+  const data = { event, provider: yandexSelected() ? 'yandex' : 'browser', phrase: state?.ttsId ?? null,
+    backlogMs: speechBacklogSeconds() * 1000, queue: speechQueue.length, ...extra };
+  navigator.sendBeacon('/api/tts-event', new Blob([JSON.stringify(data)], { type: 'application/json' }));
+}
+
+function showSpeechStats() {
+  if (!$('tts').checked && !speechNotice) { $('ttsMetrics').textContent = ''; return; }
+  const starts = [...speechStats.starts].sort((a, b) => a - b);
+  const p95 = starts.length ? (starts[Math.ceil(starts.length * .95) - 1] / 1000).toFixed(1) + ' с' : '—';
+  $('ttsMetrics').textContent = `Озвучка · стартов: ${starts.length}, p95 ожидания: ${p95}, ` +
+    `очередь: ${speechQueue.length}, изменений уже сказанного: ${speechStats.prefixMismatch}, пропущено из-за очереди: ${speechStats.backlogDropped}, ошибок: ${speechStats.errors}` +
+    (speechNotice ? `. ${speechNotice}` : '');
+}
+
+function enqueueSpeech(state, first = false) {
+  if (state.ttsDropped || speechActive?.state === state || speechQueue.includes(state)) return;
+  if (!first && !state.ttsCandidateFinal && speechBacklogSeconds() > 4) {
+    speechStats.backlogDropped++;
+    logSpeech('drop_backlog', state);
+    showSpeechStats();
+    return;
+  }
+  state.ttsQueuedAt = performance.now();
+  if (first) speechQueue.unshift(state);
+  else speechQueue.push(state);
+  logSpeech('queued', state);
+  while (speechQueue.length > 2) {
+    const dropped = speechQueue.splice(first ? 1 : 0, 1)[0];
+    dropped.ttsDropped = true;
+    speechStats.backlogDropped++;
+    logSpeech('drop_backlog', dropped);
+    showSpeechStats();
+  }
+  pumpSpeech();
+}
+
+function pumpSpeech() {
+  if (!speechReady() || speechActive || speechRestartTimer || !$('tts').checked) return;
+  while (speechQueue.length) {
+    const state = speechQueue.shift();
+    if (state.ttsDropped || state.captureGeneration !== captureGeneration) continue;
+    const allWords = speechWords(state.ttsCandidate);
+    const desired = state.ttsCandidateFinal ? allWords : allWords.slice(0, -1); // последний токен черновика нестабилен
+    if (desired.length < 2 && !state.ttsCandidateFinal) continue;
+    const committed = state.ttsWords;
+    const matches = committed.every((word, index) =>
+      index < desired.length && comparableWord(word) === comparableWord(desired[index]));
+    if (!matches) {
+      state.ttsDropped = true;
+      speechStats.prefixMismatch++;
+      logSpeech('drop_prefix', state);
+      showSpeechStats();
+      continue;
+    } // уже сказанное нельзя исправить без повтора
+    if (desired.length <= committed.length) continue;
+    let end = committed.length;
+    while (end < desired.length && desired.slice(committed.length, end + 1).join(' ').length <= 180) end++;
+    if (end === committed.length) end++;
+    const spokenWords = desired.slice(0, end);
+    const text = desired.slice(committed.length, end).join(' ');
+    startSpeech(state, text, spokenWords);
+    return;
+  }
+}
+
+function startSpeech(state, text, spokenWords) {
+  if (yandexSelected()) return startYandexSpeech(state, text, spokenWords);
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = { en: 'en-US', ru: 'ru-RU', de: 'de-DE', fr: 'fr-FR', es: 'es-ES' }[$('tgt').value] || $('tgt').value;
+  utterance.rate = 1.12;
+  const voices = matchingVoices();
+  utterance.voice = voices.find((voice) => voice.voiceURI === $('voice').value) || voices[0] || null;
+  const epoch = speechQueueEpoch;
+  const job = { state, text, spokenWords, watchdog: null, started: false, startedAt: null };
+  speechActive = job;
+  utterance.onstart = () => {
+    if (epoch !== speechQueueEpoch) return;
+    if (state.captureGeneration !== captureGeneration || !$('tts').checked) cancelSpeech();
+    else {
+      job.started = true;
+      job.startedAt = performance.now();
+      speechStats.starts.push(job.startedAt - state.ttsQueuedAt);
+      logSpeech('start', state, { waitMs: job.startedAt - state.ttsQueuedAt });
+      if (speechStats.starts.length > 50) speechStats.starts.shift();
+      showSpeechStats();
+    }
+  };
+  utterance.onend = () => {
+    if (epoch !== speechQueueEpoch || speechActive !== job) return;
+    clearTimeout(job.watchdog);
+    state.ttsWords = spokenWords;
+    logSpeech('done', state, { playMs: performance.now() - job.startedAt });
+    speechActive = null;
+    if (state.ttsCandidate) enqueueSpeech(state, true);
+    pumpSpeech();
+  };
+  utterance.onerror = (event) => {
+    if (epoch !== speechQueueEpoch || speechActive !== job) return;
+    clearTimeout(job.watchdog);
+    state.ttsDropped = true;
+    speechActive = null;
+    speechStats.errors++;
+    logSpeech('error', state, { reason: event?.error || 'browser' });
+    showSpeechStats();
+    if (event?.error === 'not-allowed') {
+      $('tts').checked = false;
+      speechNotice = 'Браузер запретил озвучивание: включите его нажатием на переключатель';
+      cancelSpeech();
+      showSpeechStats();
+      return;
+    }
+    pumpSpeech();
+  };
+  try {
+    window.speechSynthesis.resume();
+    window.speechSynthesis.speak(utterance);
+    job.watchdog = setTimeout(() => {
+      if (epoch !== speechQueueEpoch || speechActive !== job) return;
+      state.ttsDropped = true;
+      speechStats.errors++;
+      logSpeech('error', state, { reason: 'watchdog' });
+      showSpeechStats();
+      ++speechQueueEpoch;
+      speechActive = null;
+      window.speechSynthesis.cancel();
+      speechRestartTimer = setTimeout(() => { speechRestartTimer = null; pumpSpeech(); }, 150);
+    }, Math.max(4500, Math.min(20000, speechSeconds(text) * 1500 + 1500)));
+  } catch (error) {
+    speechActive = null;
+    state.ttsDropped = true;
+    speechStats.errors++;
+    logSpeech('error', state, { reason: 'exception' });
+    showSpeechStats();
+    console.error('Speech synthesis:', error);
+    pumpSpeech();
+  }
+}
+
+async function startYandexSpeech(state, text, spokenWords) {
+  const epoch = speechQueueEpoch;
+  const controller = new AbortController();
+  const job = { state, text, spokenWords, started: false, startedAt: null, controller, audio: null, audioUrl: null, watchdog: null };
+  speechActive = job;
+  const current = () => epoch === speechQueueEpoch && speechActive === job &&
+    state.captureGeneration === captureGeneration && $('tts').checked;
+  try {
+    job.watchdog = setTimeout(() => controller.abort(), 20_000);
+    const response = await fetch('/api/tts', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, voice: $('voice').value || 'marina' }), signal: controller.signal,
+    });
+    if (!response.ok) {
+      const body = await response.json();
+      throw new Error(body.error || `SpeechKit HTTP ${response.status}`);
+    }
+    if (!current()) return;
+    const audio = new Audio();
+    audio.playbackRate = Math.min(1.3, 1.12 + Math.max(0, speechBacklogSeconds() - 4) * .025);
+    job.audio = audio;
+    const finished = new Promise((resolve, reject) => {
+      audio.onended = resolve;
+      audio.onerror = () => reject(new Error('Не удалось воспроизвести звук SpeechKit'));
+      controller.signal.addEventListener('abort', () => reject(new Error('Таймаут или отмена озвучки')), { once: true });
+    });
+    audio.onplaying = () => {
+      if (!current() || job.started) return;
+      job.started = true;
+      job.startedAt = performance.now();
+      speechNotice = '';
+      speechStats.starts.push(job.startedAt - state.ttsQueuedAt);
+      logSpeech('start', state, { waitMs: job.startedAt - state.ttsQueuedAt });
+      if (speechStats.starts.length > 50) speechStats.starts.shift();
+      showSpeechStats();
+    };
+    if ('MediaSource' in window && MediaSource.isTypeSupported('audio/mpeg') && response.body) {
+      const media = new MediaSource();
+      job.audioUrl = URL.createObjectURL(media);
+      audio.src = job.audioUrl;
+      await new Promise((resolve, reject) => {
+        media.addEventListener('sourceopen', resolve, { once: true });
+        media.addEventListener('error', () => reject(new Error('MediaSource недоступен')), { once: true });
+      });
+      if (!current()) return;
+      const source = media.addSourceBuffer('audio/mpeg');
+      const queue = [];
+      let done = false, started = false;
+      const append = () => {
+        if (!current() || source.updating) return;
+        if (queue.length) source.appendBuffer(queue.shift());
+        else if (done && media.readyState === 'open') media.endOfStream();
+      };
+      source.addEventListener('updateend', () => {
+        if (!started && current()) { started = true; audio.play().catch(() => controller.abort()); }
+        append();
+      });
+      const reader = response.body.getReader();
+      while (current()) {
+        const part = await reader.read();
+        if (part.done) { done = true; append(); break; }
+        if (part.value.length) { queue.push(part.value); append(); }
+      }
+    } else {
+      job.audioUrl = URL.createObjectURL(await response.blob());
+      audio.src = job.audioUrl;
+      if (current()) await audio.play();
+    }
+    if (!current()) return;
+    await finished;
+    if (!current()) return;
+    state.ttsWords = spokenWords;
+    logSpeech('done', state, { playMs: performance.now() - job.startedAt });
+    speechActive = null;
+    clearTimeout(job.watchdog);
+    URL.revokeObjectURL(job.audioUrl);
+    if (state.ttsCandidate) enqueueSpeech(state, true);
+    pumpSpeech();
+  } catch (error) {
+    if (!current()) return;
+    state.ttsDropped = true;
+    speechActive = null;
+    speechStats.errors++;
+    logSpeech('error', state, { reason: error.name || 'yandex' });
+    speechNotice = `SpeechKit: ${error.message}`;
+    showSpeechStats();
+    pumpSpeech();
+  } finally {
+    clearTimeout(job.watchdog);
+    if (job.audioUrl && speechActive !== job) URL.revokeObjectURL(job.audioUrl);
+  }
+}
+
+function speakTranslation(state, translated, final = false) {
+  if (!speechReady() || !$('tts').checked || state.captureGeneration !== captureGeneration) return;
+  state.ttsCandidate = translated;
+  state.ttsCandidateFinal = final;
+  state.ttsQueuedAt = performance.now();
+  enqueueSpeech(state);
+}
+
+if (speechAvailable) {
+  populateVoices();
+  window.speechSynthesis.addEventListener('voiceschanged', populateVoices);
+}
+$('tgt').addEventListener('change', () => {
+  cancelSpeech();
+  if (yandexSelected() && $('tgt').value !== 'ru') $('ttsProvider').value = 'browser';
+  populateVoices();
+  $('tts').disabled = !speechReady();
+  if ($('tts').checked && (!speechReady() || (!yandexSelected() && !matchingVoices().length))) {
+    $('tts').checked = false;
+    speechNotice = 'Для целевого языка нет доступного голоса';
+    showSpeechStats();
+  }
+});
+$('ttsProvider').addEventListener('change', () => {
+  const interrupted = speechActive?.state || phrase;
+  cancelSpeech();
+  populateVoices();
+  $('tts').disabled = !speechReady();
+  if (interrupted?.ttsCandidate && $('tts').checked) enqueueSpeech(interrupted);
+});
+$('voice').addEventListener('change', () => {
+  const interrupted = speechActive?.state || phrase;
+  cancelSpeech();
+  if (interrupted?.ttsCandidate && $('tts').checked) enqueueSpeech(interrupted);
+});
+$('tts').addEventListener('change', () => {
+  cancelSpeech();
+  if ($('tts').checked && (!speechReady() || (!yandexSelected() && !matchingVoices().length))) {
+    $('tts').checked = false;
+    speechNotice = 'Для целевого языка нет доступного голоса';
+    showSpeechStats();
+    return;
+  }
+  if ($('tts').checked) speechNotice = '';
+  showSpeechStats();
+  if (phrase) {
+    if ($('tts').checked && phrase.lastTranslation) speakTranslation(phrase, phrase.lastTranslation, false);
+  }
+});
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  cfg = c;
+  $('ttsProvider').querySelector('[value=yandex]').disabled = !c.yandexTts;
+  if (c.yandexTts && $('tgt').value === 'ru') {
+    $('ttsProvider').value = 'yandex';
+    $('tts').disabled = false;
+    populateVoices();
+  }
+  if (!c.llm) { $('mode').querySelector('[value=llm]').disabled = true; }
+  if (!c.gemini) { $('mode').querySelector('[value=gemini]').disabled = true; }
+  if (!c.gemini || !('Translator' in self)) $('mode').querySelector('[value=hybrid]').disabled = true;
+  if (!c.deepseek) $('mode').querySelector('[value=deepseek]').disabled = true;
+  if (!c.deepseek || !('Translator' in self)) $('mode').querySelector('[value=hybridDeepseek]').disabled = true;
+  if (!c.yandexTranslate) $('mode').querySelector('[value=yandex]').disabled = true;
+  if (!c.yandexTranslate || !('Translator' in self)) $('mode').querySelector('[value=hybridYandex]').disabled = true;
+  if (c.yandexTranslate) $('mode').value = 'Translator' in self ? 'hybridYandex' : 'yandex';
+  else if (c.gemini) $('mode').value = 'Translator' in self ? 'hybrid' : 'gemini';
+  else if (c.deepseek) $('mode').value = 'Translator' in self ? 'hybridDeepseek' : 'deepseek';
+  if (!('Translator' in self)) {
+    $('mode').querySelector('[value=chrome]').disabled = true;
+    if (c.yandexTranslate) $('mode').value = 'yandex';
+    else if (c.gemini) $('mode').value = 'gemini';
+    else if (c.deepseek) $('mode').value = 'deepseek';
+    else if (c.llm) $('mode').value = 'llm';
+  }
+  if (c.gemini || c.deepseek || c.yandexTranslate) {
+    refreshStats();
+    setInterval(refreshStats, 5000);
+  }
+});
+
+async function refreshStats() {
+  try {
+    const response = await fetch('/api/stats');
+    if (!response.ok) return;
+    const { gemini, deepseek, yandexTranslate } = await response.json();
+    const seconds = (ms) => ms == null ? '—' : `${(ms / 1000).toFixed(1)} с`;
+    const lines = [];
+    if (cfg.gemini) {
+      const { all, final } = gemini;
+      const latest = gemini.recent[0];
+      lines.push(all.count ?
+        `Gemini · ${all.count} запросов: p50 ${seconds(all.p50Ms)}, p95 ${seconds(all.p95Ms)}, ≥5 с: ${all.slow}, ошибок: ${all.errors}, пропущено черновиков: ${gemini.skippedDrafts}, ждут: ${gemini.pending}${gemini.pending ? ` (до ${seconds(gemini.oldestPendingMs)})` : ''}. Финальные: p95 ${seconds(final.p95Ms)}. Последний: шлюз ${seconds(latest.gatewayMs)}, очередь ${seconds(latest.queueMs)}.` :
+        `Gemini: замеров пока нет, ждут: ${gemini.pending}`);
+    }
+    if (cfg.deepseek) {
+      const { all, final } = deepseek;
+      lines.push(all.count ?
+        `DeepSeek · ${all.count} запросов: p50 ${seconds(all.p50Ms)}, p95 ${seconds(all.p95Ms)}, ≥5 с: ${all.slow}, ошибок: ${all.errors}, ждут: ${deepseek.pending}${deepseek.pending ? ` (до ${seconds(deepseek.oldestPendingMs)})` : ''}. Финальные: p95 ${seconds(final.p95Ms)}.` :
+        `DeepSeek: замеров пока нет, ждут: ${deepseek.pending}`);
+    }
+    if (cfg.yandexTranslate && yandexTranslate) {
+      const { all, final } = yandexTranslate;
+      lines.push(all.count ?
+        `Yandex Translate · ${all.count} запросов: p50 ${seconds(all.p50Ms)}, p95 ${seconds(all.p95Ms)}, ошибок: ${all.errors}. Финальные: p95 ${seconds(final.p95Ms)}.` :
+        'Yandex Translate: замеров пока нет');
+    }
+    $('metrics').textContent = lines.join(' ');
+  } catch { /* статистика не должна мешать переводу */ }
+}
+
+// ---------- перевод ----------
+async function createChromeTranslator(sourceLanguage, targetLanguage) {
+  if (!('Translator' in self)) throw new Error('Translator API недоступен (нужен Chrome 138+ на десктопе)');
+  return Translator.create({
+    sourceLanguage, targetLanguage,
+    monitor(m) {
+      m.addEventListener('downloadprogress', (e) =>
+        setStatus(`загрузка языковой модели ${Math.round(e.loaded * 100)}%`));
+    },
+  });
+}
+
+async function translate(text, context, kind) {
+  const mode = $('mode').value;
+  if (mode === 'chrome' || (['hybrid', 'hybridDeepseek', 'hybridYandex'].includes(mode) && kind === 'draft')) {
+    return (await translatorPromise).translate(text);
+  }
+  const provider = mode === 'hybrid' ? 'gemini' : mode === 'hybridDeepseek' ? 'deepseek' :
+    mode === 'hybridYandex' ? 'yandex' : mode;
+  try {
+    const r = await fetch('/api/translate', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text, context, source: $('src').value, target: $('tgt').value, provider, kind }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || r.status);
+    return data.translation;
+  } catch (error) {
+    if (['hybridDeepseek', 'hybridYandex'].includes(mode) && kind === 'final') return (await translatorPromise).translate(text);
+    throw error;
+  }
+}
+
+const wordCount = (text) => text.split(/\s+/).filter(Boolean).length;
+const joinText = (...parts) => parts.filter(Boolean).join(' ').trim();
+
+// Берём только слова, которые совпали в двух последовательных interim-гипотезах.
+function stableWords(previous, current) {
+  const a = previous.trim().split(/\s+/), b = current.trim().split(/\s+/);
+  let count = 0;
+  while (count < a.length && count < b.length &&
+         a[count].toLowerCase().replace(/[^\p{L}\p{N}]/gu, '') ===
+         b[count].toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')) count++;
+  return b.slice(0, count).join(' ');
+}
+
+function ensurePhrase() {
+  if (phrase) return phrase;
+  const row = document.createElement('div');
+  row.className = 'row draft';
+  row.innerHTML = `<div class="src"></div><div class="tr pending">перевожу…</div>`;
+  log.appendChild(row);
+  scrollDown();
+  phrase = { row, stableText: '', lastRequestText: '', lastSuccessText: '', lastRequestAt: null,
+    revision: 0, inFlight: null, timer: null, final: false, context: history.slice(-3),
+    captureGeneration, ttsId: ++nextSpeechPhraseId, ttsWords: [], ttsCandidate: '', ttsCandidateFinal: false,
+    ttsDropped: false, ttsUseServerFinal: false, finalText: '',
+    lastTranslation: '', lastFinalTranslation: '' };
+  return phrase;
+}
+
+function renderTranslation(state, translated, elapsed, kind, sourceText) {
+  state.lastTranslation = translated;
+  const final = kind === 'final' || (state.final && state.finalText === sourceText);
+  if (final) state.lastFinalTranslation = translated;
+  const el = state.row.querySelector('.tr');
+  el.textContent = translated;
+  el.classList.remove('pending');
+  const ms = document.createElement('span');
+  ms.className = 'ms'; ms.textContent = `${Math.round(elapsed)} мс`;
+  el.appendChild(ms);
+  if (!['hybrid', 'hybridDeepseek', 'hybridYandex'].includes($('mode').value) || state.ttsUseServerFinal ||
+      (yandexSelected() && final) || (!yandexSelected() && !final)) {
+    speakTranslation(state, translated, final);
+  }
+}
+
+function requestTranslation(state, text) {
+  const kind = state.final ? 'final' : 'draft';
+  const usesDraftSlot = kind === 'draft' && ['gemini', 'deepseek', 'yandex'].includes($('mode').value);
+  if (usesDraftSlot && activeServerDrafts >= 1) return;
+  if (usesDraftSlot) activeServerDrafts++;
+  const revision = ++state.revision;
+  state.lastRequestText = text;
+  state.lastRequestAt = performance.now();
+  state.inFlight = { revision, text };
+  const started = performance.now();
+  translate(text, state.context, kind)
+    .then((translated) => {
+      if (revision !== state.revision) return;
+      if (!state.final && state.stableText !== text && !state.stableText.startsWith(`${text} `)) return;
+      state.lastSuccessText = text;
+      renderTranslation(state, translated, performance.now() - started, kind, text);
+    })
+    .catch((error) => {
+      if (revision !== state.revision) return;
+      if (state.final) state.row.querySelector('.tr').textContent = `ошибка перевода: ${error.message}`;
+    })
+    .finally(() => {
+      if (usesDraftSlot) {
+        activeServerDrafts--;
+        if (phrase && phrase !== state) scheduleDraft(phrase);
+      }
+      if (state.inFlight?.revision !== revision) return;
+      state.inFlight = null;
+      if (!state.final && state === phrase) scheduleDraft(state);
+    });
+}
+
+function scheduleDraft(state) {
+  if (state.final || state.timer || state.inFlight) return;
+  const text = state.stableText;
+  if (wordCount(text) < DRAFT_MIN_WORDS || text === state.lastRequestText) return;
+  const appended = text.startsWith(`${state.lastRequestText} `);
+  if (appended && wordCount(text) - wordCount(state.lastRequestText) < DRAFT_NEW_WORDS) return;
+  const interval = $('mode').value === 'gemini' ? Math.max(DRAFT_INTERVAL_MS, cfg.geminiDraftIntervalMs || 0) : DRAFT_INTERVAL_MS;
+  const delay = state.lastRequestAt === null ? 150 :
+    Math.max(150, state.lastRequestAt + interval - performance.now());
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (!state.final && state === phrase) scheduleDraftNow(state);
+  }, delay);
+}
+
+function scheduleDraftNow(state) {
+  const text = state.stableText;
+  if (state.inFlight || wordCount(text) < DRAFT_MIN_WORDS || text === state.lastRequestText) return;
+  const appended = text.startsWith(`${state.lastRequestText} `);
+  if (appended && wordCount(text) - wordCount(state.lastRequestText) < DRAFT_NEW_WORDS) return;
+  requestTranslation(state, text);
+}
+
+function updatePhrase(sourceText, stableText) {
+  if (!sourceText) return;
+  const state = ensurePhrase();
+  state.row.querySelector('.src').textContent = sourceText;
+  state.stableText = stableText;
+  scheduleDraft(state);
+}
+
+// Закрепляем ту же строку окончательным текстом; поздние черновые ответы игнорируются.
+function flush() {
+  const text = joinText(buffer.join(' '), latestInterim);
+  buffer = [];
+  latestInterim = '';
+  if (!text) return;
+  const state = ensurePhrase();
+  phrase = null;
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = null;
+  state.final = true;
+  state.finalText = text;
+  state.row.classList.remove('draft');
+  state.row.querySelector('.src').textContent = text;
+  if (['hybrid', 'hybridDeepseek', 'hybridYandex'].includes($('mode').value)) {
+    // Даже при совпадении текста с локальным черновиком нужен финальный ответ сервера.
+    requestTranslation(state, text);
+    if ($('tts').checked && speechReady() && !yandexSelected()) {
+      (async () => {
+        try {
+          const localFinal = await (await translatorPromise).translate(text);
+          if (!localFinal?.trim()) throw new Error('Пустой локальный перевод');
+          speakTranslation(state, localFinal, true);
+        } catch (error) {
+          // Если локальная модель не ответила, используем экранный финал после его прихода.
+          state.ttsUseServerFinal = true;
+          if (state.lastFinalTranslation) speakTranslation(state, state.lastFinalTranslation, true);
+        }
+      })();
+    }
+  } else if (state.lastSuccessText === text) {
+    if (state.inFlight && state.inFlight.text !== text) ++state.revision;
+    if (state.lastTranslation) speakTranslation(state, state.lastTranslation, true);
+  } else if (state.inFlight?.text !== text) {
+    requestTranslation(state, text);
+  }
+
+  history.push(text);
+  if (history.length > 10) history.shift();
+}
+
+const scrollDown = () => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+
+// ---------- Deepgram ----------
+function stopKeepAlive(sock) {
+  if (sock && sock !== keepAliveSocket) return;
+  if (keepAliveTimer) clearInterval(keepAliveTimer);
+  keepAliveTimer = keepAliveSocket = null;
+}
+
+function startKeepAlive(sock) {
+  stopKeepAlive();
+  keepAliveSocket = sock;
+  // Deepgram закрывает поток после 10 секунд без аудио или текстового сообщения.
+  keepAliveTimer = setInterval(() => {
+    if (sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: 'KeepAlive' }));
+  }, 4000);
+}
+
+function handleDeepgram(msg) {
+  if (msg.type === 'Results') {
+    const text = msg.channel?.alternatives?.[0]?.transcript ?? '';
+    if (msg.is_final) {
+      if (text) buffer.push(text);
+      latestInterim = '';
+      updatePhrase(buffer.join(' '), buffer.join(' '));
+      // конец фразы: пауза (speech_final), конец предложения, или слишком длинный монолог
+      if (msg.speech_final || /[.?!…]$/.test(text) || wordCount(buffer.join(' ')) > 30) flush();
+    } else {
+      const stable = stableWords(latestInterim, text);
+      latestInterim = text;
+      updatePhrase(joinText(buffer.join(' '), text), joinText(buffer.join(' '), stable));
+    }
+  } else if (msg.type === 'UtteranceEnd') {
+    flush();
+  }
+}
+
+async function connectDeepgram(language) {
+  const tok = await fetch('/api/token', { method: 'POST' }).then(r => r.json());
+  if (!tok.access_token) throw new Error(tok.error || 'нет токена Deepgram');
+  const params = new URLSearchParams({
+    model: 'nova-3', language,
+    encoding: 'linear16', sample_rate: '16000', channels: '1',
+    smart_format: 'true', interim_results: 'true',
+    endpointing: '300',          // мс тишины до speech_final
+    utterance_end_ms: '1000',    // страховка: по таймингам слов, устойчиво к шуму
+    vad_events: 'true',
+  });
+  // браузер не даёт ставить заголовки на WebSocket — токен едет в Sec-WebSocket-Protocol
+  const sock = new WebSocket(`wss://api.deepgram.com/v1/listen?${params}`, ['bearer', tok.access_token]);
+  sock.onmessage = (ev) => { if (sock === ws) handleDeepgram(JSON.parse(ev.data)); };
+  sock.onclose = (ev) => {
+    stopKeepAlive(sock);
+    if (ws === sock) { setStatus(`Deepgram закрыл соединение (${ev.code}) ${ev.reason}`, 'err'); stop(); }
+  };
+  sock.onerror = () => setStatus('ошибка WebSocket Deepgram', 'err');
+  await new Promise((ok, fail) => {
+    const timeout = setTimeout(() => { sock.close(); fail(new Error('таймаут подключения к Deepgram')); }, 8000);
+    sock.onopen = () => { clearTimeout(timeout); startKeepAlive(sock); ok(); };
+  });
+  return sock;
+}
+
+async function startAudioCapture(track, sock) {
+  const context = audioContext;
+  await context.audioWorklet.addModule('/pcm-worklet.js');
+  if (audioContext !== context) throw new Error('Захват звука отменён');
+  const source = context.createMediaStreamSource(new MediaStream([track]));
+  const filter1 = context.createBiquadFilter();
+  const filter2 = context.createBiquadFilter();
+  for (const filter of [filter1, filter2]) {
+    filter.type = 'lowpass';
+    filter.frequency.value = 6500;
+    filter.Q.value = Math.SQRT1_2;
+  }
+  const worklet = new AudioWorkletNode(context, 'pcm16k', { outputChannelCount: [1] });
+  const sink = context.createGain();
+  sink.gain.value = 0; // worklet must stay connected, without replaying captured audio
+  worklet.port.onmessage = ({ data }) => {
+    if (ws === sock && sock.readyState === WebSocket.OPEN && data.byteLength) sock.send(data);
+  };
+  source.connect(filter1);
+  filter1.connect(filter2);
+  filter2.connect(worklet);
+  worklet.connect(sink);
+  sink.connect(context.destination);
+  audioSource = source;
+  lowpass1 = filter1;
+  lowpass2 = filter2;
+  audioWorklet = worklet;
+  silentSink = sink;
+  await context.resume();
+}
+
+function stopAudioCapture() {
+  audioWorklet?.port.close();
+  audioSource?.disconnect();
+  lowpass1?.disconnect();
+  lowpass2?.disconnect();
+  audioWorklet?.disconnect();
+  silentSink?.disconnect();
+  audioContext?.close().catch((error) => console.error('AudioContext close:', error));
+  audioSource = lowpass1 = lowpass2 = audioWorklet = silentSink = audioContext = null;
+}
+
+// ---------- старт / стоп ----------
+$('start').onclick = async () => {
+  const src = $('src').value, tgt = $('tgt').value;
+  if (src === tgt) return setStatus('языки совпадают', 'err');
+  const generation = ++captureGeneration;
+  cancelSpeech();
+  $('start').disabled = true;
+  for (const id of ['src', 'tgt', 'mode']) $(id).disabled = true;
+  setStatus('выбор вкладки…');
+
+  // Оба вызова требуют пользовательского жеста — запускаем синхронно, до любых await.
+  translatorPromise = ['chrome', 'hybrid', 'hybridDeepseek', 'hybridYandex'].includes($('mode').value) ? createChromeTranslator(src, tgt) : Promise.resolve(null);
+  // Не блокируем захват звука, пока Chrome скачивает языковую модель.
+  translatorPromise.catch((e) => setStatus(`ошибка Chrome Translator: ${e.message}`, 'err'));
+  let streamP;
+  try {
+    audioContext = new AudioContext();
+    streamP = navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: 'browser' },   // Chrome не отдаёт audio без video
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, suppressLocalAudioPlayback: false },
+      preferCurrentTab: false, selfBrowserSurface: 'exclude', surfaceSwitching: 'include', systemAudio: 'include',
+    });
+  } catch (error) {
+    setStatus(error.message || String(error), 'err');
+    stop();
+    return;
+  }
+
+  try {
+    const selectedStream = await streamP;
+    if (generation !== captureGeneration) { selectedStream.getTracks().forEach(t => t.stop()); return; }
+    stream = selectedStream;
+    const audio = stream.getAudioTracks()[0];
+    if (!audio) throw new Error('звук не захвачен — включите «Также поделиться звуком вкладки»');
+    audio.addEventListener('ended', stop);            // пользователь нажал «Закрыть доступ»
+
+    setStatus('подключение к Deepgram…');
+    const sock = await connectDeepgram(src);
+    if (generation !== captureGeneration) {
+      stopKeepAlive(sock);
+      sock.send(JSON.stringify({ type: 'CloseStream' }));
+      return;
+    }
+    ws = sock;
+
+    await startAudioCapture(audio, ws);
+    if (generation !== captureGeneration) return;
+
+    $('stop').disabled = false;
+    const model = $('mode').value === 'chrome' ? 'Chrome on-device' :
+      $('mode').value === 'hybrid' ? `Chrome черновик + ${cfg.geminiModel} финал` :
+      $('mode').value === 'hybridDeepseek' ? `Chrome черновик + ${cfg.deepseekModel} финал` :
+      $('mode').value === 'hybridYandex' ? 'Chrome черновик + Yandex Translate финал' :
+      $('mode').value === 'gemini' ? cfg.geminiModel :
+      $('mode').value === 'deepseek' ? cfg.deepseekModel :
+      $('mode').value === 'yandex' ? 'Yandex Translate' : cfg.llmModel;
+    setStatus(`в эфире · ${src} → ${tgt} · ${model}`, 'live');
+  } catch (e) {
+    if (generation !== captureGeneration) return;
+    if (!statusEl.classList.contains('err')) setStatus(e.message || String(e), 'err');
+    stop();
+  }
+};
+
+function stop() {
+  ++captureGeneration;
+  cancelSpeech();
+  flush();
+  stopKeepAlive();
+  stopAudioCapture();
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'CloseStream' }));
+  stream?.getTracks().forEach(t => t.stop());
+  ws = stream = null;
+  $('start').disabled = false; $('stop').disabled = true;
+  for (const id of ['src', 'tgt', 'mode']) $(id).disabled = false;
+  if (!statusEl.classList.contains('err')) setStatus('остановлено');
+}
+$('stop').onclick = stop;
+</script>
+</body>
+</html>

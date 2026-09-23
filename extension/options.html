@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveDub: ключи API</title>
+<link rel="stylesheet" href="ui.css">
+<style>
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .hint { color: var(--muted); margin: 0 0 20px; }
+  fieldset { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 14px; margin: 0 0 14px; display: grid; gap: 10px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  .check { display: flex; gap: 10px; align-items: center; }
+  .result { font-size: 12px; color: var(--muted); }
+  .result.ok { color: var(--ok); } .result.err { color: var(--err); }
+  a { color: var(--accent); }
+  .save { display: flex; gap: 12px; align-items: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Ключи API</h1>
+  <p class="hint">Ключи хранятся только в этом профиле Chrome (<code>chrome.storage.local</code>), не синхронизируются
+    и уходят только в API своего сервиса. Нужен только Deepgram; без остальных ключей перевод выполняет встроенный переводчик Chrome.</p>
+  <form id="form">
+    <fieldset>
+      <legend>Deepgram — распознавание речи</legend>
+      <label>API key<input id="deepgramKey" type="password" autocomplete="off" required></label>
+      <div class="check"><button type="button" data-check="deepgram">Проверить</button><span class="result" data-result="deepgram"></span></div>
+      <span class="result"><a href="https://console.deepgram.com" target="_blank" rel="noreferrer">console.deepgram.com</a> → API Keys</span>
+    </fieldset>
+    <fieldset>
+      <legend>DeepSeek — финальный перевод</legend>
+      <label>API key<input id="deepseekKey" type="password" autocomplete="off"></label>
+      <label>Модель<input id="deepseekModel" type="text" autocomplete="off"></label>
+      <div class="check"><button type="button" data-check="deepseek">Проверить</button><span class="result" data-result="deepseek"></span></div>
+    </fieldset>
+    <fieldset>
+      <legend>Yandex Cloud — Translate и SpeechKit</legend>
+      <label>API key сервисного аккаунта<input id="yandexKey" type="password" autocomplete="off"></label>
+      <label>Folder ID (необязательно, если ключ сервисного аккаунта)<input id="yandexFolderId" type="text" autocomplete="off"></label>
+      <span class="result">Роли: <code>ai.translate.user</code> для перевода, <code>ai.speechkit-tts.user</code> для озвучки.</span>
+      <div class="check"><button type="button" data-check="yandex">Проверить</button><span class="result" data-result="yandex"></span></div>
+    </fieldset>
+    <div class="save"><button class="primary" type="submit">Сохранить</button><span id="saved" class="result"></span></div>
+  </form>
+</main>
+<script type="module" src="options.js"></script>
+</body>
+</html>
