@@ -379,12 +379,14 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && req.url === '/api/tts-event') {
       const event = await readBody(req);
-      const allowed = new Set(['queued', 'start', 'done', 'cancel', 'drop_backlog', 'drop_prefix', 'error']);
+      const allowed = new Set(['queued', 'start', 'done', 'cancel', 'drop_backlog', 'drop_prefix', 'rewrite', 'error']);
       if (!allowed.has(event.event) || !['browser', 'yandex'].includes(event.provider)) {
         return json(res, 400, { error: 'invalid tts event' });
       }
       const number = (value) => Number.isFinite(value) ? Math.max(0, Math.min(Math.round(value), 120_000)) : null;
       recordTts({ source: 'browser', event: event.event, provider: event.provider,
+        mode: typeof event.mode === 'string' ? event.mode.slice(0, 32) : null,
+        target: typeof event.target === 'string' ? event.target.slice(0, 8) : null,
         phrase: number(event.phrase), waitMs: number(event.waitMs), playMs: number(event.playMs),
         backlogMs: number(event.backlogMs), queue: number(event.queue), reason: typeof event.reason === 'string' ? event.reason.slice(0, 40) : null });
       return json(res, 200, { ok: true });

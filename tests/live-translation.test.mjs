@@ -120,8 +120,10 @@ test('Yandex TTS starts on a stable draft before the source sentence ends', asyn
   app.advance(150);
   app.requests[0].respond('Мы уже готовы идти');
   await app.settle();
+  app.context.speakTranslation(app.context.ensurePhrase(), 'Мы уже готовы идти завтра', false);
+  await app.settle();
   assert.equal(app.yandexRequests.length, 1);
-  assert.equal(app.yandexRequests[0].body.text, 'Мы уже готовы');
+  assert.equal(app.yandexRequests[0].body.text, 'Мы уже готовы идти');
   assert.equal(app.elements.log.children[0].className, 'row draft');
   app.audios[0].finish();
   await app.settle();
@@ -137,10 +139,114 @@ test('turning off Yandex TTS aborts synthesis and pauses its audio', async () =>
   app.advance(150);
   app.requests[0].respond('Мы уже готовы идти');
   await app.settle();
+  app.context.speakTranslation(app.context.ensurePhrase(), 'Мы уже готовы идти завтра', false);
+  await app.settle();
   app.elements.tts.checked = false;
   app.elements.tts.dispatch('change');
   assert.equal(app.yandexRequests[0].signal.aborted, true);
   assert.equal(app.audios[0].paused, true);
+  await app.settle();
+});
+
+test('Yandex TTS continues an aligned final without repeating the stable draft', async () => {
+  const app = harness({ gemini: false, yandexTts: true, llm: false }, { withSpeech: true, withYandex: true });
+  await app.settle();
+  app.elements.tts.checked = true;
+  const state = app.context.ensurePhrase();
+  app.context.speakTranslation(state, 'Мы уже готовы идти', false);
+  app.context.speakTranslation(state, 'Мы уже готовы идти дальше', false);
+  await app.settle();
+  assert.equal(app.yandexRequests[0].body.text, 'Мы уже готовы идти');
+  app.context.speakTranslation(state, 'Мы уже готовы идти дальше вместе', true);
+  app.audios[0].finish();
+  await app.settle();
+  assert.equal(app.yandexRequests[1].body.text, 'дальше вместе');
+  app.audios[1].finish();
+  await app.settle();
+  assert.equal(state.ttsDropped, false);
+});
+
+test('Yandex TTS speaks a rewritten final instead of dropping the rest of the phrase', async () => {
+  const app = harness({ gemini: false, yandexTts: true, llm: false }, { withSpeech: true, withYandex: true });
+  await app.settle();
+  app.elements.tts.checked = true;
+  const state = app.context.ensurePhrase();
+  app.context.speakTranslation(state, 'Я думаю, что это работает', false);
+  app.context.speakTranslation(state, 'Я думаю, что это работает хорошо', false);
+  await app.settle();
+  assert.equal(app.yandexRequests[0].body.text, 'Я думаю, что это работает');
+  app.context.speakTranslation(state, 'Мне кажется, что это работает иначе', true);
+  app.audios[0].finish();
+  await app.settle();
+  assert.equal(app.yandexRequests[1].body.text, 'иначе');
+  assert.equal(state.ttsDropped, false);
+  app.audios[1].finish();
+  await app.settle();
+});
+
+test('speech alignment does not skip a new negation or changed number', () => {
+  const app = harness();
+  assert.equal(app.context.resumeFinalSpeech(['Я', 'хочу', 'это'], ['Я', 'не', 'хочу', 'это']), 0);
+  assert.equal(app.context.resumeFinalSpeech(['200', 'долларов', 'кредита'],
+    ['300', 'долларов', 'кредита']), 0);
+  assert.equal(vm.runInNewContext("sameSpeechWord('шестнадцать', 'шестьдесят')", app.context), false);
+  assert.equal(vm.runInNewContext("sameSpeechWord('девятнадцать', 'девяносто')", app.context), false);
+  assert.equal(vm.runInNewContext('sameSpeechWord("should", "shouldn\'t")', app.context), false);
+  assert.equal(app.context.resumeFinalSpeech(['это', 'важно', 'сказал', 'что'],
+    ['это', 'совсем', 'другое', 'и', 'еще', 'раз', 'сказал', 'что']), 0);
+});
+
+test('a rewritten final runs before another queued phrase without overlapping Yandex jobs', async () => {
+  const app = harness({ gemini: false, yandexTts: true, llm: false }, { withSpeech: true, withYandex: true });
+  await app.settle();
+  app.elements.tts.checked = true;
+  const first = app.context.ensurePhrase();
+  app.context.speakTranslation(first, 'Я думаю что это работает', false);
+  app.context.speakTranslation(first, 'Я думаю что это работает хорошо', false);
+  await app.settle();
+  app.context.speakTranslation(first, 'Мне кажется что это работает иначе', true);
+  vm.runInNewContext('phrase = null', app.context);
+  const second = app.context.ensurePhrase();
+  app.context.speakTranslation(second, 'Следующая фраза уже готова', true);
+  assert.equal(app.yandexRequests.length, 1);
+  app.audios[0].finish();
+  await app.settle();
+  assert.equal(app.yandexRequests.length, 2);
+  assert.equal(app.yandexRequests[1].body.text, 'иначе');
+  app.audios[1].finish();
+  await app.settle();
+  assert.equal(app.yandexRequests[2].body.text, 'Следующая фраза уже готова');
+  app.audios[2].finish();
+  await app.settle();
+  assert.equal(first.ttsDropped, false);
+  assert.equal(second.ttsDropped, false);
+});
+
+test('Yandex TTS releases an invalidated job and preserves queued finals', async () => {
+  const app = harness({ gemini: false, yandexTts: true, llm: false }, { withSpeech: true, withYandex: true });
+  await app.settle();
+  app.elements.tts.checked = true;
+  const first = app.context.ensurePhrase();
+  app.context.speakTranslation(first, 'Первая финальная фраза', true);
+  app.elements.tts.checked = false; // состояние изменилось до завершения fetch, без обработчика UI
+  await app.settle();
+  assert.equal(vm.runInNewContext('speechActive === null', app.context), true);
+  app.elements.tts.checked = true;
+  vm.runInNewContext('phrase = null', app.context);
+  const second = app.context.ensurePhrase();
+  app.context.speakTranslation(second, 'Вторая финальная фраза', true);
+  vm.runInNewContext('phrase = null', app.context);
+  const third = app.context.ensurePhrase();
+  app.context.speakTranslation(third, 'Третья финальная фраза', true);
+  vm.runInNewContext('phrase = null', app.context);
+  const fourth = app.context.ensurePhrase();
+  app.context.speakTranslation(fourth, 'Четвертая финальная фраза', true);
+  assert.equal(second.ttsDropped, false);
+  assert.equal(third.ttsDropped, false);
+  assert.equal(fourth.ttsDropped, false);
+  assert.equal(vm.runInNewContext('speechQueue.length', app.context), 2);
+  await app.settle();
+  app.audios[0].finish();
   await app.settle();
 });
 
@@ -239,6 +345,24 @@ test('waits for three new stable words and throttles draft requests', async () =
   app.advance(1);
   assert.equal(app.requests.length, 2);
   assert.equal(app.requests[1].body.text, 'We are ready to go now everyone');
+});
+
+test('Yandex drafts refresh after two new source words and 650 ms', async () => {
+  const app = harness({ gemini: false, deepseek: false, yandexTranslate: true, llm: false });
+  await app.settle();
+  app.result('We are ready');
+  app.result('We are ready now');
+  app.advance(150);
+  assert.equal(app.requests.length, 1);
+  app.requests[0].respond('Мы готовы');
+  await app.settle();
+  app.result('We are ready to go');
+  app.result('We are ready to go now');
+  app.advance(649);
+  assert.equal(app.requests.length, 1);
+  app.advance(1);
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.requests[1].body.text, 'We are ready to go');
 });
 
 test('ignores a draft answer after the transcript revises earlier words', async () => {
