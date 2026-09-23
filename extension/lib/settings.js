@@ -18,6 +18,7 @@ export const DEFAULT_PREFS = {
   voice: '',
   subtitles: true,
   duck: 0.3,               // громкость оригинала во время озвучки
+  endpointing: 300,        // мс тишины, после которых Deepgram закрывает фразу
 };
 
 export async function loadKeys() {

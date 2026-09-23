@@ -4,12 +4,14 @@ export const DEEPSEEK_BASE = 'https://api.deepseek.com';
 export const YANDEX_TRANSLATE_URL = 'https://translate.api.cloud.yandex.net/translate/v2/translate';
 export const YANDEX_TTS_URL = 'https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize';
 
-export function deepgramUrl(language) {
+export const ENDPOINTING_CHOICES = [150, 300, 500, 800];
+
+export function deepgramUrl(language, { endpointing = 300 } = {}) {
   const params = new URLSearchParams({
     model: 'nova-3', language,
     encoding: 'linear16', sample_rate: '16000', channels: '1',
     smart_format: 'true', interim_results: 'true',
-    endpointing: '300',          // мс тишины до speech_final
+    endpointing: String(endpointing), // мс тишины до speech_final
     utterance_end_ms: '1000',    // страховка: по таймингам слов, устойчиво к шуму
     vad_events: 'true',
   });
@@ -17,7 +19,7 @@ export function deepgramUrl(language) {
 }
 
 // Браузер не даёт ставить заголовки на WebSocket, поэтому ключ передаётся в Sec-WebSocket-Protocol.
-export const openDeepgram = (key, language) => new WebSocket(deepgramUrl(language), ['token', key]);
+export const openDeepgram = (key, language, options) => new WebSocket(deepgramUrl(language, options), ['token', key]);
 
 // Перевод через LLM: пара предыдущих реплик как контекст, чтобы
 // местоимения и термины переводились согласованно.

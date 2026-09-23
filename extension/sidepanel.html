@@ -33,6 +33,12 @@
       <option value="yandex">Yandex SpeechKit</option>
     </select></label>
     <label>Голос<select id="voice"><option value="">Авто</option></select></label>
+    <label title="Сколько тишины ждать, прежде чем считать фразу законченной. Меньше — быстрее, но фраза может разорваться">Конец фразы<select id="endpointing">
+      <option value="150">150 мс · быстрее</option>
+      <option value="300">300 мс</option>
+      <option value="500">500 мс</option>
+      <option value="800">800 мс · целыми фразами</option>
+    </select></label>
   </div>
   <div class="toggles">
     <label><input id="tts" type="checkbox"> Озвучивать</label>
