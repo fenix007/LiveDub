@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Минимальный захват звука вкладки + live-перевод (Deepgram + Chrome Translator API / LLM)",
-  "engines": { "node": ">=20.6" },
+  "engines": {
+    "node": ">=20.6"
+  },
   "scripts": {
     "start": "node --env-file=.env server.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
   }
 }
