@@ -1,7 +1,10 @@
 // Очередь озвучки перевода, перенесённая из public/index.html без привязки к DOM.
-// Черновик произносится без последнего (нестабильного) слова, после финала
-// досказываются новые слова; уже сказанное начало не повторяется.
-import { comparableWord, speechWords } from './text.js';
+// Браузерный голос произносит черновик без последнего (нестабильного) слова, после
+// финала досказываются новые слова; уже сказанное начало не повторяется.
+// SpeechKit озвучивает только слова, совпавшие в двух черновых переводах подряд,
+// а если финал переписал сказанное — продолжает с надёжного стыка или
+// произносит финал заново как исправление.
+import { commonSpeechWords, resumeFinalSpeech, sameSpeechWord, speechWords } from './text.js';
 
 const BCP47 = { en: 'en-US', ru: 'ru-RU', de: 'de-DE', fr: 'fr-FR', es: 'es-ES' };
 export const speechLang = (code) => BCP47[code] || code;
@@ -30,6 +33,7 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
   let notice = '';
 
   const report = () => onStats({ ...stats, notice });
+  const yandexSelected = () => config().provider === 'yandex';
   const setActive = (job) => { active = job; onSpeaking(Boolean(job)); };
   const recordStart = (job, state) => {
     job.started = true;
@@ -93,7 +97,9 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
     if (first) queue.unshift(state);
     else queue.push(state);
     while (queue.length > 2) {
-      queue.splice(first ? 1 : 0, 1)[0].ttsDropped = true;
+      const index = queue.findIndex((item) => !item.ttsCandidateFinal);
+      if (index < 0) break; // финальные реплики нельзя молча выкидывать из очереди
+      queue.splice(index, 1);
       stats.backlogDropped++;
       report();
     }
@@ -102,21 +108,36 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
 
   function pump() {
     if (!ready() || active || restartTimer || !config().enabled) return;
-    while (queue.length) {
+    while (!active && queue.length) {
       const state = queue.shift();
       if (state.ttsDropped || !isCurrent(state)) continue;
       const allWords = speechWords(state.ttsCandidate);
-      const desired = state.ttsCandidateFinal ? allWords : allWords.slice(0, -1); // последний токен черновика нестабилен
+      // У браузерного голоса последний токен черновика нестабилен; черновик SpeechKit уже подтверждён.
+      const desired = state.ttsCandidateFinal || yandexSelected() ? allWords : allWords.slice(0, -1);
       if (desired.length < 2 && !state.ttsCandidateFinal) continue;
       const committed = state.ttsWords;
       const matches = committed.every((word, index) =>
-        index < desired.length && comparableWord(word) === comparableWord(desired[index]));
-      if (!matches) { // уже сказанное нельзя исправить без повтора
-        state.ttsDropped = true;
-        stats.prefixMismatch++;
+        index < desired.length && sameSpeechWord(word, desired[index]));
+      if (!matches) {
+        if (!yandexSelected()) { // браузерный голос не повторяет уже сказанное
+          state.ttsDropped = true;
+          stats.prefixMismatch++;
+          report();
+          continue;
+        }
+        if (!state.ttsRewritten) {
+          state.ttsRewritten = true;
+          stats.prefixMismatch++;
+        }
+        if (state.ttsCandidateFinal) {
+          state.ttsWords = desired.slice(0, resumeFinalSpeech(committed, desired));
+          queue.unshift(state);
+        }
         report();
-        continue;
+        continue; // черновик с расхождением ждёт финала
       }
+      // Каждый удалённый перевод может менять последние слова; короткие клочки звучат рвано.
+      if (yandexSelected() && !state.ttsCandidateFinal && desired.length - committed.length < 2) continue;
       if (desired.length <= committed.length) continue;
       let end = committed.length;
       while (end < desired.length && desired.slice(committed.length, end + 1).join(' ').length <= 180) end++;
@@ -213,12 +234,18 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
       }
       if (!current()) return;
       const audio = new Audio();
+      // При отставании очереди говорим чуть быстрее, но не больше 1.3x.
+      const otherBacklog = queue.reduce((sum, item) => sum + speechSeconds(
+        speechWords(item.ttsCandidate).slice(item.ttsWords.length).join(' ')), 0);
+      audio.defaultPlaybackRate = Math.min(1.3, 1.12 + Math.max(0, otherBacklog - 4) * .025);
+      audio.playbackRate = audio.defaultPlaybackRate;
       job.audio = audio;
       const finished = new Promise((resolve, reject) => {
         audio.onended = resolve;
         audio.onerror = () => reject(new Error('не удалось воспроизвести звук'));
         controller.signal.addEventListener('abort', () => reject(new Error('таймаут или отмена озвучки')), { once: true });
       });
+      finished.catch(() => {});
       audio.onplaying = () => {
         if (!current() || job.started) return;
         notice = '';
@@ -232,11 +259,12 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
         await new Promise((resolve, reject) => {
           media.addEventListener('sourceopen', resolve, { once: true });
           media.addEventListener('error', () => reject(new Error('MediaSource недоступен')), { once: true });
+          controller.signal.addEventListener('abort', () => reject(new Error('таймаут или отмена озвучки')), { once: true });
         });
         if (!current()) return;
         const sourceBuffer = media.addSourceBuffer('audio/mpeg');
         const parts = [];
-        let done = false, started = false;
+        let done = false, started = false, receivedAudio = false;
         const append = () => {
           if (!current() || sourceBuffer.updating) return;
           if (parts.length) sourceBuffer.appendBuffer(parts.shift());
@@ -249,8 +277,11 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
         const reader = response.body.getReader();
         while (current()) {
           const part = await reader.read();
-          if (part.done) { done = true; append(); break; }
-          if (part.value.length) { parts.push(part.value); append(); }
+          if (part.done) {
+            if (!receivedAudio) throw new Error('пустой звук');
+            done = true; append(); break;
+          }
+          if (part.value.length) { receivedAudio = true; parts.push(part.value); append(); }
         }
       } else {
         job.audioUrl = URL.createObjectURL(await response.blob());
@@ -265,18 +296,42 @@ export function createSpeech({ config, isCurrent, synthesize, onStats = () => {}
       finishJob(job);
     } catch (error) {
       if (!current()) return;
-      failJob(state, `SpeechKit: ${error.message}`);
+      setActive(null);
+      stats.errors++;
+      notice = `SpeechKit: ${error.message}`;
+      report();
+      if (state.ttsCandidateFinal && (state.ttsRetries || 0) < 1) { // финал пробуем ещё раз
+        state.ttsRetries = (state.ttsRetries || 0) + 1;
+        enqueue(state, true);
+      }
+      pump();
     } finally {
       clearTimeout(job.watchdog);
-      if (job.audioUrl && active !== job) URL.revokeObjectURL(job.audioUrl);
+      if (active === job) { // задание устарело (озвучку выключили и т. п.) — освобождаем очередь
+        setActive(null);
+        controller.abort();
+        job.audio?.pause();
+        pump();
+      }
+      if (job.audioUrl) URL.revokeObjectURL(job.audioUrl);
     }
   }
 
   function speak(state, translated, final = false) {
     if (!ready() || !config().enabled || !isCurrent(state)) return;
-    state.ttsCandidate = translated;
+    if (state.ttsCandidateFinal && !final) return;
+    if (yandexSelected() && !final) {
+      const words = speechWords(translated);
+      const previous = state.ttsPreviousDraft;
+      state.ttsPreviousDraft = words;
+      if (!previous) return; // первое предположение переводчика ещё не подтверждено
+      const approved = commonSpeechWords(previous, words);
+      if (approved.length <= state.ttsWords.length) return;
+      state.ttsCandidate = approved.join(' ');
+    } else {
+      state.ttsCandidate = translated;
+    }
     state.ttsCandidateFinal = final;
-    state.ttsQueuedAt = performance.now();
     enqueue(state);
   }
 

@@ -117,3 +117,91 @@ test('latency stats keep a sliding window per engine', async () => {
   assert.equal(draft.count, 0);
   assert.equal(stats.summary('deepseek').all.p50Ms, 900);
 });
+
+test('speech alignment does not skip a new negation or changed number', async () => {
+  const { resumeFinalSpeech, sameSpeechWord, commonSpeechWords } = await import('../extension/lib/text.js');
+  assert.equal(resumeFinalSpeech(['Я', 'хочу', 'это'], ['Я', 'не', 'хочу', 'это']), 0);
+  assert.equal(resumeFinalSpeech(['200', 'долларов', 'кредита'], ['300', 'долларов', 'кредита']), 0);
+  assert.equal(sameSpeechWord('шестнадцать', 'шестьдесят'), false);
+  assert.equal(sameSpeechWord('девятнадцать', 'девяносто'), false);
+  assert.equal(sameSpeechWord('should', "shouldn't"), false);
+  assert.equal(sameSpeechWord('ещё', 'еще'), true);
+  assert.equal(resumeFinalSpeech(['это', 'важно', 'сказал', 'что'],
+    ['это', 'совсем', 'другое', 'и', 'еще', 'раз', 'сказал', 'что']), 0);
+  assert.equal(resumeFinalSpeech(['Я', 'думаю,', 'что', 'это', 'работает'],
+    ['Мне', 'кажется,', 'что', 'это', 'работает', 'иначе']), 5);
+  assert.deepEqual(commonSpeechWords(['Мы', 'уже', 'готовы', 'идти'], ['Мы', 'уже', 'готовы', 'идти', 'дальше']),
+    ['Мы', 'уже', 'готовы', 'идти']);
+});
+
+function speechHarness() {
+  const requests = [];
+  const audios = [];
+  globalThis.Audio = class {
+    constructor() { audios.push(this); }
+    play() { this.onplaying?.(); return Promise.resolve(); }
+    pause() { this.paused = true; }
+    finish() { this.onended?.(); }
+  };
+  const settings = { enabled: true, provider: 'yandex', voice: '', target: 'ru', yandexKey: 'k' };
+  return import('../extension/lib/speech.js').then(({ createSpeech }) => {
+    const speech = createSpeech({
+      config: () => settings,
+      isCurrent: () => true,
+      synthesize: async ({ text }) => { requests.push(text); return new Response(new Uint8Array([1]), { status: 200 }); },
+    });
+    const phrase = () => ({ ttsWords: [], ttsCandidate: '', ttsCandidateFinal: false, ttsDropped: false, ttsPreviousDraft: null });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
+    return { speech, phrase, requests, audios, settle, settings };
+  });
+}
+
+test('SpeechKit voices confirmed draft words and continues an aligned final', async () => {
+  const { speech, phrase, requests, audios, settle } = await speechHarness();
+  const state = phrase();
+  speech.speak(state, 'Мы уже готовы идти', false);
+  await settle();
+  assert.equal(requests.length, 0, 'первый черновик ещё не подтверждён');
+  speech.speak(state, 'Мы уже готовы идти дальше', false);
+  await settle();
+  assert.deepEqual(requests, ['Мы уже готовы идти']);
+  speech.speak(state, 'Мы уже готовы идти дальше вместе', true);
+  audios[0].finish();
+  await settle();
+  assert.deepEqual(requests, ['Мы уже готовы идти', 'дальше вместе']);
+  audios[1].finish();
+  await settle();
+  assert.equal(state.ttsDropped, false);
+});
+
+test('SpeechKit speaks the rewritten tail of a final and keeps queued finals', async () => {
+  const { speech, phrase, requests, audios, settle } = await speechHarness();
+  const first = phrase();
+  speech.speak(first, 'Я думаю что это работает', false);
+  speech.speak(first, 'Я думаю что это работает хорошо', false);
+  await settle();
+  speech.speak(first, 'Мне кажется что это работает иначе', true);
+  const others = [phrase(), phrase(), phrase()];
+  others.forEach((state, i) => speech.speak(state, `Финальная фраза номер ${i + 1}`, true));
+  assert.equal(requests.length, 1, 'задания SpeechKit не перекрываются');
+  for (let i = 0; i < 5; i++) {
+    audios[i]?.finish();
+    await settle();
+  }
+  assert.deepEqual(requests, ['Я думаю что это работает', 'иначе',
+    'Финальная фраза номер 1', 'Финальная фраза номер 2', 'Финальная фраза номер 3']);
+  assert.ok([first, ...others].every((state) => !state.ttsDropped));
+});
+
+test('SpeechKit releases a job invalidated before synthesis finished', async () => {
+  const { speech, phrase, requests, audios, settle, settings } = await speechHarness();
+  speech.speak(phrase(), 'Первая финальная фраза', true);
+  settings.enabled = false; // выключили без cancel(), как при смене состояния снаружи
+  await settle();
+  settings.enabled = true;
+  speech.speak(phrase(), 'Вторая финальная фраза', true);
+  await settle();
+  assert.deepEqual(requests, ['Первая финальная фраза', 'Вторая финальная фраза']);
+  audios.at(-1).finish();
+  await settle();
+});

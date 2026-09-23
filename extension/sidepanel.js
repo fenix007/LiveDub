@@ -12,6 +12,9 @@ const log = $('log'), statusEl = $('status');
 const DRAFT_INTERVAL_MS = 1200;
 const DRAFT_MIN_WORDS = 3;
 const DRAFT_NEW_WORDS = 3;
+// Yandex Translate отвечает быстро: черновик обновляется чаще и после меньшего прироста.
+const YANDEX_DRAFT_INTERVAL_MS = 650;
+const YANDEX_DRAFT_NEW_WORDS = 2;
 const REMOTE_ENGINES = new Set(['deepseek', 'yandex']);
 const LOCKED_WHILE_LIVE = ['source', 'target', 'draftEngine', 'finalEngine', 'start'];
 
@@ -246,6 +249,7 @@ function ensurePhrase() {
   phrase = { row, sourceText: '', stableText: '', lastRequestText: '', lastSuccessText: '', lastRequestAt: null,
     revision: 0, inFlight: null, timer: null, final: false, context: history.slice(-3),
     captureGeneration, ttsWords: [], ttsCandidate: '', ttsCandidateFinal: false,
+    ttsPreviousDraft: null, ttsRewritten: false,
     ttsDropped: false, ttsUseServerFinal: false, finalText: '',
     lastTranslation: '', lastFinalTranslation: '' };
   return phrase;
@@ -304,13 +308,14 @@ function draftDue(state) {
   const text = state.stableText;
   if (prefs.draftEngine === 'off' || wordCount(text) < DRAFT_MIN_WORDS || text === state.lastRequestText) return false;
   const appended = text.startsWith(`${state.lastRequestText} `);
-  return !appended || wordCount(text) - wordCount(state.lastRequestText) >= DRAFT_NEW_WORDS;
+  const minNewWords = prefs.draftEngine === 'yandex' ? YANDEX_DRAFT_NEW_WORDS : DRAFT_NEW_WORDS;
+  return !appended || wordCount(text) - wordCount(state.lastRequestText) >= minNewWords;
 }
 
 function scheduleDraft(state) {
   if (state.final || state.timer || state.inFlight || !draftDue(state)) return;
   const delay = state.lastRequestAt === null ? 150 :
-    Math.max(150, state.lastRequestAt + DRAFT_INTERVAL_MS - performance.now());
+    Math.max(150, state.lastRequestAt + (prefs.draftEngine === 'yandex' ? YANDEX_DRAFT_INTERVAL_MS : DRAFT_INTERVAL_MS) - performance.now());
   state.timer = setTimeout(() => {
     state.timer = null;
     if (!state.final && state === phrase && !state.inFlight && draftDue(state)) requestTranslation(state, state.stableText);
