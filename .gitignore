@@ -5,3 +5,5 @@ dist/
 .playwright-mcp/
 .DS_Store
 .serena/
+node_modules/
+bench/out/

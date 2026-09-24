@@ -3,7 +3,7 @@
 NODE ?= node
 PYTHON ?= $(shell command -v python3.12 || command -v python3)
 
-.PHONY: help setup start run dev check check-node gemini-deps extension-zip
+.PHONY: help setup start run dev check check-node gemini-deps extension-zip bench
 
 help:
 	@printf '%s\n' \
@@ -14,6 +14,7 @@ help:
 	  'make gemini-deps — установить Python-зависимость gemini-gateway' \
 	  'make check  — проверить синтаксис сервера, Python worker и JavaScript страницы' \
 	  'make extension-zip — собрать dist/livedub-extension.zip' \
+	  'make bench  — эталонный прогон расширения (macOS; параметры: BENCH="--final yandex,deepseek")' \
 	  'make help   — показать команды'
 
 check-node:
@@ -51,3 +52,8 @@ extension-zip:
 	rm -f dist/livedub-extension.zip
 	cd extension && zip -qr ../dist/livedub-extension.zip . -x '.*'
 	@echo 'Готово: dist/livedub-extension.zip'
+
+BENCH ?=
+bench: check-node
+	@test -d node_modules/playwright || npm install
+	$(NODE) --env-file=.env bench/run.mjs $(BENCH)

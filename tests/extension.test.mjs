@@ -35,6 +35,12 @@ test('Deepgram URL streams 16 kHz PCM with interim results', () => {
   assert.equal(url.searchParams.get('interim_results'), 'true');
 });
 
+test('Deepgram endpointing follows the chosen pause and defaults to 300 ms', () => {
+  assert.equal(new URL(deepgramUrl('en')).searchParams.get('endpointing'), '300');
+  assert.equal(new URL(deepgramUrl('en', { endpointing: 150 })).searchParams.get('endpointing'), '150');
+  assert.equal(new URL(deepgramUrl('en', { endpointing: 800 })).searchParams.get('utterance_end_ms'), '1000');
+});
+
 test('DeepSeek request disables thinking and sends context in the prompt', async () => {
   const { calls, fetchImpl } = recorder(() => jsonResponse(200, { choices: [{ message: { content: ' Привет ' } }] }));
   const result = await translateDeepSeek({ key: 'k', model: 'deepseek-flash', fetchImpl },
@@ -54,8 +60,12 @@ test('DeepSeek errors do not leak the key', async () => {
     (error) => error.message === 'DeepSeek HTTP 401' && !error.message.includes('secret-key'));
   const timeout = async (url, init) => new Promise((resolve, reject) =>
     init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+  // Таймер AbortSignal.timeout не держит процесс: без обычного таймера Node 22
+  // завершает цикл событий раньше таймаута и отменяет оставшиеся тесты.
+  const keepAlive = setTimeout(() => {}, 1000);
   await assert.rejects(translateDeepSeek({ key: 'k', model: 'm', timeoutMs: 20, fetchImpl: timeout }, { text: 'x', source: 'en', target: 'ru' }),
     /Таймаут DeepSeek \(20 мс\)/);
+  clearTimeout(keepAlive);
   await assert.rejects(translateDeepSeek({ key: '', model: 'm' }, { text: 'x' }), /Не задан ключ DeepSeek/);
 });
 
@@ -204,4 +214,29 @@ test('SpeechKit releases a job invalidated before synthesis finished', async () 
   assert.deepEqual(requests, ['Первая финальная фраза', 'Вторая финальная фраза']);
   audios.at(-1).finish();
   await settle();
+});
+
+test('stage timing compares the sent audio with Deepgram cursors', async () => {
+  const { createAudioClock, lagMs, lastWordEnd, transcriptCursor } = await import('../extension/lib/timing.js');
+  const clock = createAudioClock();
+  for (let i = 0; i < 50; i++) clock.add(1280); // 50 кадров по 40 мс
+  assert.equal(clock.seconds(), 2);
+
+  const msg = { start: 0.5, duration: 1.1, channel: { alternatives: [{ words: [{ end: 0.9 }, { end: 1.3 }] }] } };
+  assert.equal(transcriptCursor(msg), 1.6);
+  assert.equal(lastWordEnd(msg), 1.3);
+  assert.equal(lastWordEnd({ start: 1, duration: 0.5 }), 1.5);
+  assert.equal(Math.round(lagMs(clock.seconds(), transcriptCursor(msg))), 400);
+  assert.equal(lagMs(1, 1.2), 0); // курсор расшифровки не может обогнать звук
+});
+
+test('finished sentences split off a committed transcript, abbreviations do not', async () => {
+  const { splitAtSentence } = await import('../extension/lib/text.js');
+  assert.deepEqual(splitAtSentence('A lot has changed. Talk about the momentum numbers. Yeah. Always'),
+    { done: 'A lot has changed. Talk about the momentum numbers. Yeah.', rest: 'Always' });
+  assert.equal(splitAtSentence('no sentence end here yet'), null);
+  assert.equal(splitAtSentence('Ends with a period.'), null); // закрывается целиком, без хвоста
+  assert.equal(splitAtSentence('Hi. Four'), null);             // меньше трёх слов
+  assert.equal(splitAtSentence('I met Mr. Smith and Dr. Brown today and'), null);
+  assert.deepEqual(splitAtSentence('Is this ok for you? "Yes." And then'), { done: 'Is this ok for you? "Yes."', rest: 'And then' });
 });

@@ -50,3 +50,23 @@ export function stableWords(previous, current) {
          b[count].toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')) count++;
   return b.slice(0, count).join(' ');
 }
+
+// Сокращения, после которых точка не заканчивает предложение (Deepgram smart_format их сохраняет).
+const ABBREVIATION = /(?:^|\s)(?:mr|mrs|ms|dr|prof|st|vs|etc|inc|ltd|jr|sr|no|e\.g|i\.e|u\.s|u\.k|т\.е|т\.д|т\.п|г|гг|им|др)\.$|(?:^|\s)\p{Lu}\.$/iu;
+
+// Делит закреплённый текст по последней границе предложения: законченные
+// предложения можно переводить и озвучивать сразу, не дожидаясь паузы в речи.
+// null — если законченных предложений нет или в них меньше minWords слов.
+export function splitAtSentence(text, minWords = 3) {
+  const boundary = /[.?!…]+["»”)]*\s+/gu;
+  let cut = null;
+  for (const match of text.matchAll(boundary)) {
+    const end = match.index + match[0].length;
+    const done = text.slice(0, end).trim();
+    if (ABBREVIATION.test(done.replace(/["»”)]+$/u, ''))) continue;
+    if (end < text.length) cut = end;
+  }
+  if (cut === null) return null;
+  const done = text.slice(0, cut).trim(), rest = text.slice(cut).trim();
+  return wordCount(done) >= minWords && rest ? { done, rest } : null;
+}

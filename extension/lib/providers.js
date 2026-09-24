@@ -4,12 +4,14 @@ export const DEEPSEEK_BASE = 'https://api.deepseek.com';
 export const YANDEX_TRANSLATE_URL = 'https://translate.api.cloud.yandex.net/translate/v2/translate';
 export const YANDEX_TTS_URL = 'https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize';
 
-export function deepgramUrl(language) {
+export const ENDPOINTING_CHOICES = [150, 300, 500, 800];
+
+export function deepgramUrl(language, { endpointing = 300 } = {}) {
   const params = new URLSearchParams({
     model: 'nova-3', language,
     encoding: 'linear16', sample_rate: '16000', channels: '1',
     smart_format: 'true', interim_results: 'true',
-    endpointing: '300',          // мс тишины до speech_final
+    endpointing: String(endpointing), // мс тишины до speech_final
     utterance_end_ms: '1000',    // страховка: по таймингам слов, устойчиво к шуму
     vad_events: 'true',
   });
@@ -17,7 +19,18 @@ export function deepgramUrl(language) {
 }
 
 // Браузер не даёт ставить заголовки на WebSocket, поэтому ключ передаётся в Sec-WebSocket-Protocol.
-export const openDeepgram = (key, language) => new WebSocket(deepgramUrl(language), ['token', key]);
+export const openDeepgram = (key, language, options) => new WebSocket(deepgramUrl(language, options), ['token', key]);
+
+// Yandex SpeechKit принимает поток только по gRPC, поэтому звук идёт через сервер
+// LiveDub (server.js). Сервер отвечает сообщениями в формате Deepgram.
+export function yandexSttUrl(serverUrl, language, { endpointing = 300, token = '' } = {}) {
+  const url = new URL('/api/stt/yandex', serverUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.search = new URLSearchParams({ language, endpointing: String(endpointing), ...(token ? { token } : {}) });
+  return url.href;
+}
+
+export const openYandexStt = (serverUrl, language, options) => new WebSocket(yandexSttUrl(serverUrl, language, options));
 
 // Перевод через LLM: пара предыдущих реплик как контекст, чтобы
 // местоимения и термины переводились согласованно.
@@ -118,6 +131,29 @@ export async function checkDeepSeek(key, model, fetchImpl = fetch) {
   return models.length && !models.includes(model)
     ? `DeepSeek: ключ работает, но модели «${model}» нет в списке (${models.join(', ')})`
     : 'DeepSeek: ключ работает';
+}
+
+// Сервер отвечает на WebSocket только при заданном ключе SpeechKit и верном токене.
+export function checkServer(serverUrl, token, WebSocketImpl = WebSocket) {
+  return new Promise((resolve, reject) => {
+    let sock;
+    try {
+      sock = new WebSocketImpl(yandexSttUrl(serverUrl, 'en', { token }));
+    } catch {
+      return reject(new Error('Некорректный адрес сервера'));
+    }
+    const timer = setTimeout(() => { sock.close(); reject(new Error('Сервер не ответил за 8 секунд')); }, 8000);
+    sock.onopen = () => {
+      clearTimeout(timer);
+      sock.send(JSON.stringify({ type: 'CloseStream' }));
+      sock.close();
+      resolve('Сервер LiveDub: распознавание SpeechKit доступно');
+    };
+    sock.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error('Не удалось подключиться: сервер не запущен, на нём нет ключа SpeechKit или неверный токен'));
+    };
+  });
 }
 
 export async function checkYandex(key, folderId, fetchImpl = fetch) {

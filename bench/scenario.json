@@ -1,0 +1,29 @@
+{
+  "name": "interview-en-ru",
+  "source": "en",
+  "target": "ru",
+  "voices": { "A": "Samantha", "B": "Daniel" },
+  "rate": 180,
+  "lines": [
+    { "speaker": "A", "pauseAfterMs": 900, "text": "Hi, thanks for joining us today. Can you hear me well?", "ref": "Здравствуйте, спасибо, что присоединились к нам сегодня. Вы меня хорошо слышите?" },
+    { "speaker": "B", "pauseAfterMs": 700, "text": "Yes, I can hear you perfectly. Thank you for having me.", "ref": "Да, я прекрасно вас слышу. Спасибо, что пригласили." },
+    { "speaker": "A", "pauseAfterMs": 1200, "text": "Great. Let's start with a short introduction. Tell me about your current role.", "ref": "Отлично. Давайте начнём с короткого знакомства. Расскажите о своей текущей роли." },
+    { "speaker": "B", "pauseAfterMs": 400, "text": "I work as a backend engineer at a logistics company, and I have been there for 4 years.", "ref": "Я работаю бэкенд-инженером в логистической компании и работаю там уже 4 года." },
+    { "speaker": "B", "pauseAfterMs": 1500, "text": "My team owns the service that calculates delivery routes for about 300 warehouses.", "ref": "Моя команда отвечает за сервис, который рассчитывает маршруты доставки примерно для 300 складов." },
+    { "speaker": "A", "pauseAfterMs": 800, "text": "Interesting. What was the hardest problem you solved there?", "ref": "Интересно. Какую самую сложную задачу вы там решили?" },
+    { "speaker": "B", "pauseAfterMs": 500, "text": "We had a database that could not handle the load during the holiday season.", "ref": "У нас была база данных, которая не справлялась с нагрузкой в праздничный сезон." },
+    { "speaker": "B", "pauseAfterMs": 2000, "text": "We moved the heavy reports to a separate replica, and the response time dropped from 8 seconds to 1 second.", "ref": "Мы перенесли тяжёлые отчёты на отдельную реплику, и время ответа упало с 8 секунд до 1 секунды." },
+    { "speaker": "A", "pauseAfterMs": 700, "text": "Did you consider caching instead of a replica?", "ref": "Вы рассматривали кэширование вместо реплики?" },
+    { "speaker": "B", "pauseAfterMs": 1100, "text": "We did, but the data changes every few minutes, so caching would not help much.", "ref": "Рассматривали, но данные меняются каждые несколько минут, поэтому кэширование мало бы помогло." },
+    { "speaker": "A", "pauseAfterMs": 900, "text": "Makes sense. How do you usually handle disagreements with your manager?", "ref": "Понятно. Как вы обычно решаете разногласия со своим руководителем?" },
+    { "speaker": "B", "pauseAfterMs": 600, "text": "I try to bring data, not opinions.", "ref": "Я стараюсь приводить данные, а не мнения." },
+    { "speaker": "B", "pauseAfterMs": 1400, "text": "If we still disagree, I write down the risks and we decide together which option to test first.", "ref": "Если мы всё ещё не согласны, я записываю риски, и мы вместе решаем, какой вариант проверить первым." },
+    { "speaker": "A", "pauseAfterMs": 800, "text": "Good. Are you comfortable working with Kubernetes and Postgres?", "ref": "Хорошо. Вам комфортно работать с Kubernetes и Postgres?" },
+    { "speaker": "B", "pauseAfterMs": 1600, "text": "Yes, I use Postgres every day, but I have never managed a Kubernetes cluster on my own.", "ref": "Да, я пользуюсь Postgres каждый день, но никогда не управлял кластером Kubernetes самостоятельно." },
+    { "speaker": "A", "pauseAfterMs": 900, "text": "That is fine. Our platform team takes care of the cluster.", "ref": "Это нормально. Кластером занимается наша платформенная команда." },
+    { "speaker": "A", "pauseAfterMs": 1200, "text": "What salary range are you expecting?", "ref": "На какой диапазон зарплаты вы рассчитываете?" },
+    { "speaker": "B", "pauseAfterMs": 700, "text": "I am looking for something between 16 and 18 thousand euros per month before taxes.", "ref": "Я рассчитываю на сумму от 16 до 18 тысяч евро в месяц до вычета налогов." },
+    { "speaker": "A", "pauseAfterMs": 1000, "text": "Thank you. Do you have any questions for us?", "ref": "Спасибо. У вас есть вопросы к нам?" },
+    { "speaker": "B", "pauseAfterMs": 2500, "text": "Just one. How soon can I expect to hear back from you?", "ref": "Только один. Как скоро я могу ожидать от вас ответа?" }
+  ]
+}

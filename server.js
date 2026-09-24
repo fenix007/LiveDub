@@ -11,6 +11,10 @@ const PORT = Number(process.env.PORT || 3000);
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
 const YANDEX_TTS_KEY = process.env.YANDEX_SPEECHKIT_API_KEY?.trim();
 const YANDEX_TRANSLATE_KEY = (process.env.YANDEX_TRANSLATE_API_KEY || process.env.YANDEX_SPEECHKIT_API_KEY)?.trim();
+const YANDEX_STT_KEY = (process.env.YANDEX_STT_API_KEY || process.env.YANDEX_SPEECHKIT_API_KEY)?.trim();
+// Если задан, расширение должно передать его в ?token=: иначе любой, кто достучится
+// до сервера, будет распознавать речь за счёт ключа SpeechKit.
+const STT_TOKEN = process.env.LIVEDUB_STT_TOKEN?.trim();
 const YANDEX_TRANSLATE_TIMEOUT_MS = Number(process.env.YANDEX_TRANSLATE_TIMEOUT_MS || 5_000);
 if (!Number.isInteger(YANDEX_TRANSLATE_TIMEOUT_MS) || YANDEX_TRANSLATE_TIMEOUT_MS < 1) {
   throw new Error('YANDEX_TRANSLATE_TIMEOUT_MS должен быть положительным целым числом');
@@ -368,6 +372,7 @@ const server = createServer(async (req, res) => {
         llm: Boolean(LLM_KEY), llmModel: LLM_KEY ? LLM_MODEL : null,
         yandexTts: Boolean(YANDEX_TTS_KEY),
         yandexTranslate: Boolean(YANDEX_TRANSLATE_KEY),
+        yandexStt: Boolean(YANDEX_STT_KEY),
         gemini: GEMINI_ENABLED, geminiModel: GEMINI_ENABLED ? GEMINI_MODEL : null,
         deepseek: Boolean(DEEPSEEK_KEY), deepseekModel: DEEPSEEK_KEY ? DEEPSEEK_MODEL : null,
         geminiDraftIntervalMs: Math.ceil(60_000 / GEMINI_DRAFT_RPM),
@@ -507,11 +512,37 @@ const server = createServer(async (req, res) => {
   }
 });
 
+// Потоковое распознавание SpeechKit для расширения: WebSocket ⇄ gRPC.
+// Зависимости (ws, @grpc/*) грузятся только при первом подключении, поэтому
+// остальному серверу `npm install` по-прежнему не нужен.
+let sttSockets = null;
+async function acceptYandexStt(req, socket, head, url) {
+  const reject = (status, text) => { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`); };
+  if (!YANDEX_STT_KEY) return reject(503, 'YANDEX_SPEECHKIT_API_KEY not set');
+  if (STT_TOKEN && url.searchParams.get('token') !== STT_TOKEN) return reject(401, 'Unauthorized');
+  const [{ YANDEX_STT_LANGUAGES, attachSocket }, { WebSocketServer }] = await Promise.all([import('./yandex-stt.js'), import('ws')]);
+  const language = YANDEX_STT_LANGUAGES[url.searchParams.get('language')];
+  const pauseMs = Number(url.searchParams.get('endpointing') || 300);
+  if (!language || !(pauseMs >= 100 && pauseMs <= 3000)) return reject(400, 'Bad Request');
+  sttSockets ??= new WebSocketServer({ noServer: true });
+  sttSockets.handleUpgrade(req, socket, head, (ws) => attachSocket(ws, { apiKey: YANDEX_STT_KEY, language, pauseMs }));
+}
+
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/api/stt/yandex') return socket.destroy();
+  acceptYandexStt(req, socket, head, url).catch((error) => {
+    console.error('[stt]', error.message);
+    socket.destroy();
+  });
+});
+
 server.listen(PORT, () => {
   console.log(`Открой http://localhost:${PORT} в Chrome/Edge`);
   console.log(`LLM-перевод: ${LLM_KEY ? `включён (${LLM_MODEL} @ ${LLM_BASE})` : 'выключен — только встроенный переводчик Chrome'}`);
   console.log(`Gemini-перевод: ${GEMINI_ENABLED ? `включён (${GEMINI_MODEL})` : 'выключен'}`);
   console.log(`DeepSeek-перевод: ${DEEPSEEK_KEY ? `включён (${DEEPSEEK_MODEL})` : 'выключен'}`);
+  console.log(`Распознавание SpeechKit для расширения: ${YANDEX_STT_KEY ? `ws://localhost:${PORT}/api/stt/yandex${STT_TOKEN ? ' (с токеном)' : ''}` : 'выключено'}`);
 });
 
 process.on('exit', () => geminiWorker?.kill());

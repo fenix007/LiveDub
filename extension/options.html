@@ -22,13 +22,22 @@
 <main>
   <h1>Ключи API</h1>
   <p class="hint">Ключи хранятся только в этом профиле Chrome (<code>chrome.storage.local</code>), не синхронизируются
-    и уходят только в API своего сервиса. Нужен только Deepgram; без остальных ключей перевод выполняет встроенный переводчик Chrome.</p>
+    и уходят только в API своего сервиса. Для распознавания нужен Deepgram или сервер LiveDub с SpeechKit;
+    без остальных ключей перевод выполняет встроенный переводчик Chrome.</p>
   <form id="form">
     <fieldset>
       <legend>Deepgram — распознавание речи</legend>
-      <label>API key<input id="deepgramKey" type="password" autocomplete="off" required></label>
+      <label>API key<input id="deepgramKey" type="password" autocomplete="off"></label>
       <div class="check"><button type="button" data-check="deepgram">Проверить</button><span class="result" data-result="deepgram"></span></div>
       <span class="result"><a href="https://console.deepgram.com" target="_blank" rel="noreferrer">console.deepgram.com</a> → API Keys</span>
+    </fieldset>
+    <fieldset>
+      <legend>Сервер LiveDub — распознавание Yandex SpeechKit</legend>
+      <label>Адрес сервера<input id="serverUrl" type="url" autocomplete="off"></label>
+      <label>Токен (если на сервере задан <code>LIVEDUB_STT_TOKEN</code>)<input id="serverToken" type="password" autocomplete="off"></label>
+      <span class="result">SpeechKit принимает поток только по gRPC, поэтому звук идёт через <code>server.js</code>
+        (<code>npm install</code>, затем <code>make start</code>). Ключ SpeechKit с ролью <code>ai.speechkit-stt.user</code> хранится на сервере.</span>
+      <div class="check"><button type="button" data-check="server">Проверить</button><span class="result" data-result="server"></span></div>
     </fieldset>
     <fieldset>
       <legend>DeepSeek — финальный перевод</legend>
