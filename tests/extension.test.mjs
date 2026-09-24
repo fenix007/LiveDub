@@ -60,8 +60,12 @@ test('DeepSeek errors do not leak the key', async () => {
     (error) => error.message === 'DeepSeek HTTP 401' && !error.message.includes('secret-key'));
   const timeout = async (url, init) => new Promise((resolve, reject) =>
     init.signal.addEventListener('abort', () => reject(init.signal.reason)));
+  // Таймер AbortSignal.timeout не держит процесс: без обычного таймера Node 22
+  // завершает цикл событий раньше таймаута и отменяет оставшиеся тесты.
+  const keepAlive = setTimeout(() => {}, 1000);
   await assert.rejects(translateDeepSeek({ key: 'k', model: 'm', timeoutMs: 20, fetchImpl: timeout }, { text: 'x', source: 'en', target: 'ru' }),
     /Таймаут DeepSeek \(20 мс\)/);
+  clearTimeout(keepAlive);
   await assert.rejects(translateDeepSeek({ key: '', model: 'm' }, { text: 'x' }), /Не задан ключ DeepSeek/);
 });
 
