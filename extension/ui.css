@@ -29,6 +29,9 @@ button:disabled, select:disabled { opacity: .45; cursor: default; }
 .actions { display: flex; gap: 8px; align-items: center; }
 #status { color: var(--muted); font-size: 12px; }
 #status.live { color: var(--ok); } #status.err { color: var(--err); }
+#captureMetrics { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+#captureMetrics.err { color: var(--err); }
+#captureMetrics:empty { display: none; }
 #metrics, #ttsMetrics { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 #metrics:empty, #ttsMetrics:empty { display: none; }
 main { padding: 4px 12px 24px; }

@@ -178,14 +178,57 @@ function sendToTab(tabId, message) {
 async function injectSubtitles(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content/subtitles.js'] });
+    if (session?.tabId === tabId) session.subtitleError = '';
+    return true;
+  } catch (error) {
+    if (session?.tabId === tabId) {
+      session.subtitleError = error?.message || 'нет доступа к странице';
+      showCaptureMetrics(session);
+    }
+    return false;
+  }
+}
+
+async function sendSubtitle(tabId, message) {
+  try {
+    await chrome.tabs.sendMessage(tabId, message);
   } catch {
-    setStatus('Субтитры недоступны на этой странице; перевод виден в панели', statusEl.className);
+    // Первое сообщение могло обогнать внедрение скрипта или смену страницы.
+    if (await injectSubtitles(tabId)) {
+      try {
+        await chrome.tabs.sendMessage(tabId, message);
+      } catch (error) {
+        if (session?.tabId === tabId) {
+          session.subtitleError = error?.message || 'не удалось отправить текст';
+          showCaptureMetrics(session);
+        }
+      }
+    }
   }
 }
 
 function showSubtitle(state, translated, final) {
   if (!prefs.subtitles || !session || state.captureGeneration !== captureGeneration) return;
-  sendToTab(session.tabId, { type: 'tt-subtitle', translation: translated, original: state.finalText || state.sourceText, final });
+  sendSubtitle(session.tabId, { type: 'tt-subtitle', translation: translated, original: state.finalText || state.sourceText, final });
+}
+
+function showCaptureMetrics(current) {
+  if (session !== current) return;
+  const sentSeconds = current.sentBytes / 32000;
+  const audibleSeconds = current.audibleBytes / 32000;
+  const noAudio = Date.now() - current.connectedAt > 6000 && sentSeconds < 1;
+  const silentCapture = sentSeconds > 10 && audibleSeconds < 1;
+  const noSpeech = sentSeconds > 12 && audibleSeconds > 2 && current.sttResults === 0;
+  const label = prefs.sttEngine === 'yandex' ? 'SpeechKit' : 'Deepgram';
+  const subtitleProblem = prefs.subtitles && current.subtitleError;
+  const el = $('captureMetrics');
+  const capture = current.tabTitle ? `Вкладка «${current.tabTitle.slice(0, 50)}» · ` : '';
+  el.textContent = capture + (noAudio ? 'Звук не поступает: проверьте воспроизведение.'
+    : silentCapture ? 'Аудиопоток тихий: запустите видео или проверьте выбранную вкладку.'
+      : noSpeech ? `Звук отправляется, но ${label} не прислал текст. Остановите перевод и проверьте распознаватель.`
+        : `Звук отправлен: ${sentSeconds.toFixed(1)} с · речь: ${audibleSeconds.toFixed(1)} с · ответов STT: ${current.sttResults}`)
+    + (subtitleProblem ? ` · Субтитры недоступны: ${current.subtitleError}` : '');
+  el.className = noAudio || silentCapture || noSpeech || subtitleProblem ? 'err' : '';
 }
 
 chrome.tabs.onUpdated.addListener((tabId, info) => {
@@ -526,7 +569,12 @@ async function connectStt(language) {
   const sock = yandex
     ? openYandexStt(keys.serverUrl, language, { endpointing: prefs.endpointing, token: keys.serverToken })
     : openDeepgram(keys.deepgramKey, language, { endpointing: prefs.endpointing });
-  sock.onmessage = (ev) => { if (sock === session?.ws) handleDeepgram(JSON.parse(ev.data)); };
+  sock.onmessage = (ev) => {
+    if (sock !== session?.ws) return;
+    const message = JSON.parse(ev.data);
+    if (message.type === 'Results' && message.channel?.alternatives?.[0]?.transcript) session.sttResults++;
+    handleDeepgram(message);
+  };
   sock.onclose = (ev) => {
     stopKeepAlive(sock);
     if (session?.ws === sock) stop(`${name} закрыл соединение (${ev.code}) ${ev.reason}`.trim());
@@ -573,7 +621,8 @@ $('start').onclick = async () => {
   const needsChrome = prefs.draftEngine === 'chrome' || prefs.finalEngine === 'chrome';
   translatorPromise = needsChrome ? createChromeTranslator(prefs.source, prefs.target) : Promise.resolve(null);
   translatorPromise.catch((e) => setStatus(`ошибка Chrome Translator: ${e.message}`, 'err'));
-  const current = { tabId: null, audioContext: new AudioContext(), stream: null, audio: null, ws: null };
+  const current = { tabId: null, tabTitle: '', audioContext: new AudioContext(), stream: null, audio: null, ws: null,
+    sentBytes: 0, audibleBytes: 0, sttResults: 0, connectedAt: null, metricsTimer: null, subtitleError: '' };
   session = current;
   audioClock = createAudioClock(); // время Deepgram отсчитывается от начала каждого соединения
   const cancelled = () => generation !== captureGeneration;
@@ -583,6 +632,7 @@ $('start').onclick = async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error('Не найдена активная вкладка');
     current.tabId = tab.id;
+    current.tabTitle = tab.title || '';
     let streamId;
     try {
       streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
@@ -608,6 +658,11 @@ $('start').onclick = async () => {
         if (current.ws?.readyState !== WebSocket.OPEN) return;
         current.ws.send(data);
         audioClock.add(data.byteLength);
+        current.sentBytes += data.byteLength;
+        const samples = new Int16Array(data);
+        let energy = 0;
+        for (const sample of samples) energy += (sample / 32768) ** 2;
+        if (Math.sqrt(energy / samples.length) > 0.01) current.audibleBytes += data.byteLength;
       },
     });
     if (cancelled()) return;
@@ -620,6 +675,9 @@ $('start').onclick = async () => {
       return;
     }
     current.ws = sock;
+    current.connectedAt = Date.now();
+    showCaptureMetrics(current);
+    current.metricsTimer = setInterval(() => showCaptureMetrics(current), 2000);
     if (prefs.subtitles) injectSubtitles(tab.id);
 
     const names = { chrome: 'Chrome', deepseek: keys.deepseekModel, yandex: 'Yandex Translate', off: '—' };
@@ -639,6 +697,7 @@ function stop(errorMessage) {
   const current = session;
   session = null;
   if (current) {
+    clearInterval(current.metricsTimer);
     current.audio?.stop();
     current.audioContext.close().catch(() => {});
     if (current.ws?.readyState === WebSocket.OPEN) current.ws.send(JSON.stringify({ type: 'CloseStream' }));
@@ -646,6 +705,7 @@ function stop(errorMessage) {
     if (current.tabId) sendToTab(current.tabId, { type: 'tt-subtitle-clear' });
   }
   lockControls(false);
+  $('captureMetrics').textContent = '';
   if (errorMessage) setStatus(errorMessage, 'err');
   else setStatus('остановлено');
 }
