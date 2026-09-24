@@ -16,23 +16,40 @@ import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } f
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { buildAudio } from './make-audio.mjs';
-import { scoreRun } from './score.js';
+import { scoreRun, wordErrorRate } from './score.js';
+import { prepareYoutube } from './youtube.mjs';
 
-const root = new URL('.', import.meta.url).pathname;
+const root = fileURLToPath(new URL('.', import.meta.url));
 const extensionDir = join(root, '..', 'extension');
 const outDir = join(root, 'out');
 const TAIL_MS = 8000; // ожидание после конца звука: последняя фраза и её перевод
 
 function parseArgs(argv) {
-  const options = { stt: ['deepgram'], final: ['yandex'], draft: ['off'], endpointing: [300], headed: false, verbose: false };
+  const options = { stt: ['deepgram'], final: ['yandex'], draft: ['off'], endpointing: [300],
+    youtube: '', language: 'en', start: 0, seconds: 120, headed: false, verbose: false };
   for (let i = 0; i < argv.length; i++) {
     const name = argv[i].replace(/^--/, '');
     if (name === 'headed' || name === 'verbose') { options[name] = true; continue; }
     if (!(name in options)) throw new Error(`Неизвестный флаг: ${argv[i]}`);
-    const values = String(argv[++i] ?? '').split(',').filter(Boolean);
-    options[name] = name === 'endpointing' ? values.map(Number) : values;
+    const value = String(argv[++i] ?? '');
+    if (['youtube', 'language'].includes(name)) options[name] = value;
+    else if (['start', 'seconds'].includes(name)) options[name] = Number(value);
+    else {
+      const values = value.split(',').filter(Boolean);
+      options[name] = name === 'endpointing' ? values.map(Number) : values;
+    }
+  }
+  if (options.youtube) {
+    if (!/^[a-z]{2}(?:-[A-Za-z0-9]+)?$/.test(options.language)) throw new Error('Язык субтитров: например en или ru');
+    if (!Number.isFinite(options.start) || options.start < 0 ||
+        !Number.isFinite(options.seconds) || options.seconds <= 0 || options.seconds > 300)
+      throw new Error('--start должен быть неотрицательным, --seconds — от 1 до 300');
+    if (argv.includes('--final') || argv.includes('--draft')) throw new Error('Для проверки YouTube перевод отключён: уберите --final и --draft');
+    options.final = ['off'];
+    options.draft = ['off'];
   }
   return options;
 }
@@ -126,14 +143,22 @@ async function main() {
     throw new Error('Нужен YANDEX_SPEECHKIT_API_KEY с ролью ai.speechkit-stt.user');
   }
   mkdirSync(outDir, { recursive: true });
-  const { wavPath, timingsPath, scenario } = buildAudio(join(root, 'scenario.json'), outDir);
-  const timings = JSON.parse(readFileSync(timingsPath, 'utf8'));
-  const extDir = prepareExtension(wavPath);
+  const youtube = options.youtube ? prepareYoutube({ url: options.youtube, language: options.language,
+    startSeconds: options.start, durationSeconds: options.seconds, outDir: join(outDir, 'youtube') }) : null;
+  const audio = youtube ?? buildAudio(join(root, 'scenario.json'), outDir);
+  const timings = youtube ? { source: options.language, target: options.language === 'en' ? 'ru' : 'en',
+    durationMs: youtube.durationMs, lines: [] } : JSON.parse(readFileSync(audio.timingsPath, 'utf8'));
+  if (youtube) console.log(`YouTube: ${youtube.title} (${youtube.videoId}); субтитры: ${youtube.captionKind}, ${options.language}; фрагмент ${options.start}–${options.start + options.seconds} с`);
+  const extDir = prepareExtension(audio.wavPath);
 
   const configs = options.stt.flatMap((sttEngine) => options.final.flatMap((finalEngine) => options.draft.flatMap((draftEngine) =>
     options.endpointing.map((endpointing) => ({ sttEngine, finalEngine, draftEngine, endpointing })))));
   const server = options.stt.includes('yandex') ? await startServer() : null;
-  const report = { scenario: scenario.name, startedAt: new Date().toISOString(), durationMs: timings.durationMs, runs: [] };
+  const report = { scenario: youtube ? `youtube:${youtube.videoId}` : audio.scenario.name,
+    startedAt: new Date().toISOString(), durationMs: timings.durationMs, runs: [] };
+  if (youtube) report.reference = { url: options.youtube, language: options.language,
+    startSeconds: options.start, durationSeconds: options.seconds, captionKind: youtube.captionKind,
+    text: youtube.reference };
   try {
     for (const config of configs) {
       const label = `распознавание ${config.sttEngine}, финал ${config.finalEngine}, черновик ${config.draftEngine}, конец фразы ${config.endpointing} мс`;
@@ -149,19 +174,27 @@ async function main() {
         report.runs.push({ config, error: result.error, errors: result.errors });
         continue;
       }
-      const score = scoreRun({ lines: timings.lines, phrases: result.phrases });
+      const score = youtube
+        ? { recognition: wordErrorRate(youtube.reference, result.phrases.map((phrase) => phrase.source).join(' ')) }
+        : scoreRun({ lines: timings.lines, phrases: result.phrases });
       report.runs.push({ config, score, metrics: result.metrics, phrases: result.phrases, rows: result.rows, errors: result.errors });
-      const { recognition, latency, translation } = score;
+      const { recognition } = score;
       console.log(`  распознавание: WER ${(recognition.wer * 100).toFixed(1)}% (${recognition.words} слов: ` +
         `замен ${recognition.substitutions}, пропусков ${recognition.deletions}, лишних ${recognition.insertions})`);
-      console.log(`  от конца реплики до перевода: p50 ${seconds(latency.p50Ms)}, p95 ${seconds(latency.p95Ms)}, ` +
-        `макс ${seconds(latency.maxMs)} (измерено ${latency.measured} из ${latency.lines})`);
-      console.log(`  перевод: chrF ${translation.chrF.toFixed(1)}; фраз: ${result.phrases.length}; ошибок в консоли: ${result.errors.length}`);
+      if (!youtube) {
+        const { latency, translation } = score;
+        console.log(`  от конца реплики до перевода: p50 ${seconds(latency.p50Ms)}, p95 ${seconds(latency.p95Ms)}, ` +
+          `макс ${seconds(latency.maxMs)} (измерено ${latency.measured} из ${latency.lines})`);
+        console.log(`  перевод: chrF ${translation.chrF.toFixed(1)}; фраз: ${result.phrases.length}; ошибок в консоли: ${result.errors.length}`);
+      }
       const clock = result.audioClock;
       console.log(`  звук в распознавание: ${clock.sentSeconds.toFixed(1)} с за ${clock.wallSeconds.toFixed(1)} с по часам, WAV ${clock.wavSeconds.toFixed(1)} с проигран за ${clock.playbackSeconds.toFixed(1)} с (AudioContext ${clock.sampleRate} Гц), ` +
         `макс. очередь сокета ${clock.maxBufferedSeconds.toFixed(2)} с, вкладка ${clock.visibility}`);
       console.log(`  панель: ${result.metrics}`);
-      if (options.verbose) {
+      if (options.verbose && youtube) {
+        console.log(`  субтитры: ${youtube.reference}`);
+        console.log(`  STT: ${result.phrases.map((phrase) => phrase.source).join(' ')}`);
+      } else if (options.verbose) {
         for (const line of score.perLine) {
           console.log(`    ${String(line.index + 1).padStart(2)}. ${seconds(line.latencyMs).padStart(8)}  ${timings.lines[line.index].text}`);
         }
@@ -170,6 +203,7 @@ async function main() {
   } finally {
     server?.stop();
     rmSync(extDir, { recursive: true, force: true });
+    if (youtube) rmSync(youtube.workDir, { recursive: true, force: true });
   }
   const reportPath = join(outDir, `report-${report.startedAt.replace(/[:.]/g, '-')}.json`);
   writeFileSync(reportPath, JSON.stringify(report, null, 2));

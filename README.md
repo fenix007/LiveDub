@@ -194,6 +194,23 @@ make bench BENCH="--final yandex,deepseek --endpointing 300,500 --verbose"
 в Chromium без окна нет встроенного переводчика. Отчёт с фразами и задержками по репликам
 сохраняется в `bench/out/report-*.json`.
 
+Для проверки STT на реальном YouTube-видео установите `yt-dlp`, `ffmpeg` и браузер Playwright
+(`npx playwright install chromium`). На Windows первые два можно поставить через
+`winget install --id yt-dlp.yt-dlp -e` и `winget install --id Gyan.FFmpeg -e`; после установки
+откройте новый PowerShell, чтобы команды появились в `PATH`. Видео должно иметь субтитры на языке оригинала. Стенд
+скачает аудио и субтитры, воспроизведёт выбранный фрагмент через тот же поток распознавания,
+а затем сравнит итоговый текст с субтитрами по WER. Перевод и озвучка в этом режиме выключены.
+
+```bash
+node --env-file=.env bench/run.mjs --youtube "https://www.youtube.com/watch?v=VIDEO_ID" --language en --seconds 120 --stt deepgram,yandex
+```
+
+На Windows команда та же из PowerShell в папке репозитория. Можно выбрать начало фрагмента
+флагом `--start 60` и длительность до пяти минут флагом `--seconds 90`. Для SpeechKit нужен
+`YANDEX_SPEECHKIT_API_KEY`; для Deepgram — `DEEPGRAM_API_KEY`. Если ручных субтитров нет,
+стенд использует автоматические и отмечает это в отчёте: такие субтитры сами могут ошибаться,
+поэтому WER показывает расхождение с ними, а не абсолютную точность речи.
+
 ## Запуск веб-прототипа
 
 ```bash

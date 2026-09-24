@@ -207,6 +207,7 @@ async function createChromeTranslator(sourceLanguage, targetLanguage) {
 
 async function engineTranslate(engine, text, context, kind) {
   const input = { text, context, source: prefs.source, target: prefs.target };
+  if (engine === 'off') return text;
   if (engine === 'chrome') {
     const translator = await translatorPromise;
     if (!translator) throw new Error('Chrome Translator не запущен');
