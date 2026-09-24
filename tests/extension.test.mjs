@@ -225,3 +225,14 @@ test('stage timing compares the sent audio with Deepgram cursors', async () => {
   assert.equal(Math.round(lagMs(clock.seconds(), transcriptCursor(msg))), 400);
   assert.equal(lagMs(1, 1.2), 0); // курсор расшифровки не может обогнать звук
 });
+
+test('finished sentences split off a committed transcript, abbreviations do not', async () => {
+  const { splitAtSentence } = await import('../extension/lib/text.js');
+  assert.deepEqual(splitAtSentence('A lot has changed. Talk about the momentum numbers. Yeah. Always'),
+    { done: 'A lot has changed. Talk about the momentum numbers. Yeah.', rest: 'Always' });
+  assert.equal(splitAtSentence('no sentence end here yet'), null);
+  assert.equal(splitAtSentence('Ends with a period.'), null); // закрывается целиком, без хвоста
+  assert.equal(splitAtSentence('Hi. Four'), null);             // меньше трёх слов
+  assert.equal(splitAtSentence('I met Mr. Smith and Dr. Brown today and'), null);
+  assert.deepEqual(splitAtSentence('Is this ok for you? "Yes." And then'), { done: 'Is this ok for you? "Yes."', rest: 'And then' });
+});

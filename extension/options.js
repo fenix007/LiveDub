@@ -1,5 +1,5 @@
 import { DEFAULT_KEYS, loadKeys, saveKeys } from './lib/settings.js';
-import { checkDeepgram, checkDeepSeek, checkYandex } from './lib/providers.js';
+import { checkDeepgram, checkDeepSeek, checkServer, checkYandex } from './lib/providers.js';
 
 const $ = (id) => document.getElementById(id);
 const fields = Object.keys(DEFAULT_KEYS);
@@ -20,6 +20,7 @@ const checks = {
   deepgram: ({ deepgramKey }) => checkDeepgram(deepgramKey),
   deepseek: ({ deepseekKey, deepseekModel }) => checkDeepSeek(deepseekKey, deepseekModel || DEFAULT_KEYS.deepseekModel),
   yandex: ({ yandexKey, yandexFolderId }) => checkYandex(yandexKey, yandexFolderId),
+  server: ({ serverUrl, serverToken }) => checkServer(serverUrl || DEFAULT_KEYS.serverUrl, serverToken),
 };
 const required = { deepgram: 'deepgramKey', deepseek: 'deepseekKey', yandex: 'yandexKey' };
 
@@ -28,7 +29,7 @@ for (const button of document.querySelectorAll('[data-check]')) {
     const name = button.dataset.check;
     const result = document.querySelector(`[data-result="${name}"]`);
     const current = values();
-    if (!current[required[name]]) {
+    if (required[name] && !current[required[name]]) {
       result.textContent = 'Введите ключ';
       result.className = 'result err';
       return;

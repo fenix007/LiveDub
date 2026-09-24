@@ -6,10 +6,13 @@ export const DEFAULT_KEYS = {
   deepseekModel: 'deepseek-flash',
   yandexKey: '',
   yandexFolderId: '',
+  serverUrl: 'http://localhost:3000', // сервер LiveDub для распознавания Yandex SpeechKit
+  serverToken: '',                    // LIVEDUB_STT_TOKEN сервера, если задан
 };
 
 export const DEFAULT_PREFS = {
   source: 'en',
+  sttEngine: 'deepgram',   // deepgram | yandex (через сервер LiveDub)
   target: 'ru',
   draftEngine: 'chrome',   // chrome | yandex | deepseek | off
   finalEngine: 'yandex',   // yandex | deepseek | chrome

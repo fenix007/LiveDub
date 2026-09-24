@@ -21,6 +21,17 @@ export function deepgramUrl(language, { endpointing = 300 } = {}) {
 // Браузер не даёт ставить заголовки на WebSocket, поэтому ключ передаётся в Sec-WebSocket-Protocol.
 export const openDeepgram = (key, language, options) => new WebSocket(deepgramUrl(language, options), ['token', key]);
 
+// Yandex SpeechKit принимает поток только по gRPC, поэтому звук идёт через сервер
+// LiveDub (server.js). Сервер отвечает сообщениями в формате Deepgram.
+export function yandexSttUrl(serverUrl, language, { endpointing = 300, token = '' } = {}) {
+  const url = new URL('/api/stt/yandex', serverUrl);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.search = new URLSearchParams({ language, endpointing: String(endpointing), ...(token ? { token } : {}) });
+  return url.href;
+}
+
+export const openYandexStt = (serverUrl, language, options) => new WebSocket(yandexSttUrl(serverUrl, language, options));
+
 // Перевод через LLM: пара предыдущих реплик как контекст, чтобы
 // местоимения и термины переводились согласованно.
 export function translationPrompt({ text, context = [], source, target }) {
@@ -120,6 +131,29 @@ export async function checkDeepSeek(key, model, fetchImpl = fetch) {
   return models.length && !models.includes(model)
     ? `DeepSeek: ключ работает, но модели «${model}» нет в списке (${models.join(', ')})`
     : 'DeepSeek: ключ работает';
+}
+
+// Сервер отвечает на WebSocket только при заданном ключе SpeechKit и верном токене.
+export function checkServer(serverUrl, token, WebSocketImpl = WebSocket) {
+  return new Promise((resolve, reject) => {
+    let sock;
+    try {
+      sock = new WebSocketImpl(yandexSttUrl(serverUrl, 'en', { token }));
+    } catch {
+      return reject(new Error('Некорректный адрес сервера'));
+    }
+    const timer = setTimeout(() => { sock.close(); reject(new Error('Сервер не ответил за 8 секунд')); }, 8000);
+    sock.onopen = () => {
+      clearTimeout(timer);
+      sock.send(JSON.stringify({ type: 'CloseStream' }));
+      sock.close();
+      resolve('Сервер LiveDub: распознавание SpeechKit доступно');
+    };
+    sock.onerror = () => {
+      clearTimeout(timer);
+      reject(new Error('Не удалось подключиться: сервер не запущен, на нём нет ключа SpeechKit или неверный токен'));
+    };
+  });
 }
 
 export async function checkYandex(key, folderId, fetchImpl = fetch) {

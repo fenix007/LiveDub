@@ -1,8 +1,9 @@
-// Боковая панель — весь конвейер: захват звука вкладки, Deepgram, перевод,
+// Боковая панель — весь конвейер: захват звука вкладки, распознавание (Deepgram
+// или SpeechKit через сервер LiveDub), перевод,
 // озвучка и субтитры. Закрытие панели останавливает перевод.
 import { DEFAULT_PREFS, loadKeys, loadPrefs, savePrefs } from './lib/settings.js';
-import { joinText, stableWords, wordCount } from './lib/text.js';
-import { ENDPOINTING_CHOICES, openDeepgram, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
+import { joinText, splitAtSentence, stableWords, wordCount } from './lib/text.js';
+import { ENDPOINTING_CHOICES, openDeepgram, openYandexStt, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
 import { startTabAudio } from './lib/capture.js';
 import { createSpeech } from './lib/speech.js';
 import { createLatencyStats } from './lib/stats.js';
@@ -17,7 +18,8 @@ const DRAFT_NEW_WORDS = 3;
 const YANDEX_DRAFT_INTERVAL_MS = 650;
 const YANDEX_DRAFT_NEW_WORDS = 2;
 const REMOTE_ENGINES = new Set(['deepseek', 'yandex']);
-const LOCKED_WHILE_LIVE = ['source', 'target', 'draftEngine', 'finalEngine', 'endpointing', 'start'];
+const LOCKED_WHILE_LIVE = ['source', 'target', 'sttEngine', 'draftEngine', 'finalEngine', 'endpointing', 'start'];
+const STT_NAMES = { deepgram: 'Deepgram', yandex: 'SpeechKit' };
 
 let keys = await loadKeys();
 let prefs = await loadPrefs();
@@ -85,13 +87,20 @@ function syncControls() {
   $('ttsProvider').querySelector('[value=yandex]').disabled = !keys.yandexKey;
   if (prefs.ttsProvider === 'yandex' && !speech.ready()) setPref('ttsProvider', 'browser');
   if (!ENDPOINTING_CHOICES.includes(prefs.endpointing)) setPref('endpointing', DEFAULT_PREFS.endpointing);
-  for (const id of ['source', 'target', 'draftEngine', 'finalEngine', 'ttsProvider', 'endpointing']) $(id).value = prefs[id];
+  for (const id of ['source', 'target', 'sttEngine', 'draftEngine', 'finalEngine', 'ttsProvider', 'endpointing']) $(id).value = prefs[id];
   $('tts').checked = prefs.tts;
   $('subtitles').checked = prefs.subtitles;
   $('duck').value = prefs.duck;
   populateVoices();
   $('tts').disabled = !speech.ready();
-  if (!keys.deepgramKey) setStatus('Укажите ключ Deepgram в «Ключи API»', 'err');
+  if (sttProblem()) setStatus(sttProblem(), 'err');
+}
+
+// Почему выбранный распознаватель не запустится; пустая строка — всё в порядке.
+function sttProblem() {
+  if (prefs.sttEngine === 'deepgram' && !keys.deepgramKey) return 'Укажите ключ Deepgram в «Ключи API» или выберите SpeechKit';
+  if (prefs.sttEngine === 'yandex' && !keys.serverUrl) return 'Укажите адрес сервера LiveDub в «Ключи API»';
+  return '';
 }
 
 function disableSpeechIfUnavailable() {
@@ -106,6 +115,10 @@ function disableSpeechIfUnavailable() {
 for (const id of ['source', 'draftEngine', 'finalEngine']) {
   $(id).addEventListener('change', () => setPref(id, $(id).value));
 }
+$('sttEngine').addEventListener('change', () => {
+  setPref('sttEngine', $('sttEngine').value);
+  if (!session) setStatus(sttProblem() || 'готово', sttProblem() ? 'err' : '');
+});
 $('target').addEventListener('change', () => {
   speech.cancel();
   setPref('target', $('target').value);
@@ -150,7 +163,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
   if (area !== 'local' || !changes.keys) return;
   keys = await loadKeys();
   syncControls();
-  if (keys.deepgramKey && statusEl.classList.contains('err') && !session) setStatus('готово');
+  if (!sttProblem() && statusEl.classList.contains('err') && !session) setStatus('готово');
 });
 if (speech.available) speechSynthesis.addEventListener('voiceschanged', () => { populateVoices(); $('tts').disabled = !speech.ready(); });
 
@@ -437,7 +450,7 @@ function scrollDown() {
   if (nearBottom) window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
 }
 
-// ---------- Deepgram ----------
+// ---------- распознавание ----------
 function stopKeepAlive(sock) {
   if (sock && sock !== keepAliveSocket) return;
   if (keepAliveTimer) clearInterval(keepAliveTimer);
@@ -453,7 +466,9 @@ function startKeepAlive(sock) {
   }, 4000);
 }
 
+// Сообщения Deepgram; сервер LiveDub присылает ответы SpeechKit в том же формате.
 function handleDeepgram(msg) {
+  if (msg.type === 'Error') return stop(msg.message);
   if (msg.type === 'Results') {
     const text = msg.channel?.alternatives?.[0]?.transcript ?? '';
     if (text) {
@@ -463,10 +478,14 @@ function handleDeepgram(msg) {
     if (msg.is_final) {
       if (text) buffer.push(text);
       latestInterim = '';
-      updatePhrase(buffer.join(' '), buffer.join(' '));
-      // конец фразы: пауза (speech_final), конец предложения или слишком длинный монолог
-      if (msg.speech_final || /[.?!…]$/.test(text) || wordCount(buffer.join(' ')) > 30) flush(endpointLag());
-      else if (text) prefetchFinal(buffer.join(' '));
+      const joined = buffer.join(' ');
+      updatePhrase(joined, joined);
+      // конец фразы: пауза (speech_final) или закреплённый текст кончается предложением
+      if (msg.speech_final || /[.?!…]$/.test(text)) flush(endpointLag());
+      // законченные предложения внутри — сразу в финал, хвост начинает следующую фразу
+      else if (commitSentences(joined)) return;
+      else if (wordCount(joined) > 30) flush(null); // длинный монолог без точек
+      else if (text) prefetchFinal(joined);
     } else {
       const stable = stableWords(latestInterim, text);
       latestInterim = text;
@@ -478,23 +497,48 @@ function handleDeepgram(msg) {
   }
 }
 
+// Закрывает фразу на последней границе предложения и переносит хвост в новую.
+// Работает только по закреплённому тексту (is_final): черновик Deepgram ещё может
+// измениться, и его слова потом пришли бы повторно.
+function commitSentences(text) {
+  const split = splitAtSentence(text);
+  if (!split) return false;
+  const wordEnd = phraseWordEnd; // конец последнего слова относится к хвосту
+  buffer = [split.done];
+  flush(null);
+  buffer = [split.rest];
+  phraseWordEnd = wordEnd;
+  updatePhrase(split.rest, split.rest);
+  prefetchFinal(split.rest);
+  return true;
+}
+
 // Сколько звука прошло после последнего слова фразы к моменту её закрытия.
 const endpointLag = () => phraseWordEnd == null ? null : lagMs(audioClock.seconds(), phraseWordEnd);
 
-async function connectDeepgram(language) {
-  const sock = openDeepgram(keys.deepgramKey, language, { endpointing: prefs.endpointing });
+async function connectStt(language) {
+  const yandex = prefs.sttEngine === 'yandex';
+  const name = yandex ? 'сервер LiveDub' : 'Deepgram';
+  const sock = yandex
+    ? openYandexStt(keys.serverUrl, language, { endpointing: prefs.endpointing, token: keys.serverToken })
+    : openDeepgram(keys.deepgramKey, language, { endpointing: prefs.endpointing });
   sock.onmessage = (ev) => { if (sock === session?.ws) handleDeepgram(JSON.parse(ev.data)); };
   sock.onclose = (ev) => {
     stopKeepAlive(sock);
-    if (session?.ws === sock) stop(`Deepgram закрыл соединение (${ev.code}) ${ev.reason}`.trim());
+    if (session?.ws === sock) stop(`${name} закрыл соединение (${ev.code}) ${ev.reason}`.trim());
   };
   await new Promise((ok, fail) => {
-    const timeout = setTimeout(() => { sock.close(); fail(new Error('таймаут подключения к Deepgram')); }, 8000);
+    const timeout = setTimeout(() => { sock.close(); fail(new Error(`таймаут подключения: ${name}`)); }, 8000);
     sock.onopen = () => { clearTimeout(timeout); startKeepAlive(sock); ok(); };
-    // До открытия ошибка почти всегда означает неверный ключ или язык.
-    sock.onerror = () => { clearTimeout(timeout); fail(new Error('Deepgram отклонил подключение: проверьте ключ')); };
+    // До открытия ошибка почти всегда означает неверный ключ, токен или адрес.
+    sock.onerror = () => {
+      clearTimeout(timeout);
+      fail(new Error(yandex
+        ? 'Сервер LiveDub не принял подключение: запущен ли он, есть ли на нём ключ SpeechKit, верен ли токен'
+        : 'Deepgram отклонил подключение: проверьте ключ'));
+    };
   });
-  sock.onerror = () => setStatus('ошибка WebSocket Deepgram', 'err');
+  sock.onerror = () => setStatus(`ошибка WebSocket: ${name}`, 'err');
   return sock;
 }
 
@@ -515,7 +559,7 @@ function captureErrorMessage(error) {
 
 $('start').onclick = async () => {
   if (prefs.source === prefs.target) return setStatus('языки совпадают', 'err');
-  if (!keys.deepgramKey) return setStatus('Укажите ключ Deepgram в «Ключи API»', 'err');
+  if (sttProblem()) return setStatus(sttProblem(), 'err');
   const generation = ++captureGeneration;
   speech.cancel();
   lockControls(true);
@@ -554,8 +598,8 @@ $('start').onclick = async () => {
     });
     if (cancelled()) return;
 
-    setStatus('подключение к Deepgram…');
-    const sock = await connectDeepgram(prefs.source);
+    setStatus(`подключение: ${STT_NAMES[prefs.sttEngine]}…`);
+    const sock = await connectStt(prefs.source);
     if (cancelled()) {
       stopKeepAlive(sock);
       sock.send(JSON.stringify({ type: 'CloseStream' }));
@@ -565,7 +609,8 @@ $('start').onclick = async () => {
     if (prefs.subtitles) injectSubtitles(tab.id);
 
     const names = { chrome: 'Chrome', deepseek: keys.deepseekModel, yandex: 'Yandex Translate', off: '—' };
-    setStatus(`в эфире · ${prefs.source} → ${prefs.target} · черновик: ${names[prefs.draftEngine]}, финал: ${names[prefs.finalEngine]}`, 'live');
+    setStatus(`в эфире · ${prefs.source} → ${prefs.target} · распознавание: ${STT_NAMES[prefs.sttEngine]}, ` +
+      `черновик: ${names[prefs.draftEngine]}, финал: ${names[prefs.finalEngine]}`, 'live');
   } catch (error) {
     if (cancelled()) return;
     stop(captureErrorMessage(error));
