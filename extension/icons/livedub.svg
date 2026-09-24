@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="LiveDub">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#7C3AED"/>
+      <stop offset=".55" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#1768D8"/>
+    </linearGradient>
+    <linearGradient id="echo" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#38F2D4"/>
+      <stop offset="1" stop-color="#08B8E7"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop stop-color="#F472B6" stop-opacity=".6"/>
+      <stop offset="1" stop-color="#F472B6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="29" fill="url(#tile)"/>
+  <circle cx="30" cy="25" r="45" fill="url(#glow)"/>
+  <path d="M60 48h34c9 0 16 7 16 16v19c0 9-7 16-16 16h-5l13 14-28-14H60c-9 0-16-7-16-16V64c0-9 7-16 16-16Z" fill="url(#echo)"/>
+  <path d="M34 26h42c10 0 18 8 18 18v22c0 10-8 18-18 18H44L26 98l4-15c-8-2-14-9-14-17V44c0-10 8-18 18-18Z" fill="#fff"/>
+  <rect x="36" y="49" width="9" height="17" rx="4.5" fill="#FC5A7D"/>
+  <rect x="49" y="41" width="9" height="33" rx="4.5" fill="#7048E8"/>
+  <rect x="62" y="46" width="9" height="23" rx="4.5" fill="#17BDE3"/>
+  <rect x="75" y="52" width="9" height="12" rx="4.5" fill="#FFAA3B"/>
+</svg>

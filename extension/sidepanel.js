@@ -553,9 +553,10 @@ function lockControls(live) {
 
 function captureErrorMessage(error) {
   const message = error?.message || String(error);
-  if (/activeTab|not been invoked|Chrome pages cannot be captured/i.test(message)) {
-    return 'Нажмите на иконку расширения на нужной вкладке, затем «Переводить эту вкладку». Страницы chrome:// захватить нельзя.';
-  }
+  if (/Chrome pages cannot be captured|Cannot capture a chrome:|Cannot capture a chrome-extension:/i.test(message))
+    return 'Эту служебную страницу Chrome нельзя захватить. Откройте вкладку с видео или звуком.';
+  if (/activeTab|not been invoked|permission|not allowed/i.test(message))
+    return 'Нет доступа к этой вкладке. Нажмите на иконку LiveDub на нужной вкладке, затем «Переводить эту вкладку».';
   if (/active stream/i.test(message)) return 'Эта вкладка уже захвачена: остановите предыдущий захват.';
   return message;
 }
@@ -581,7 +582,16 @@ $('start').onclick = async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) throw new Error('Не найдена активная вкладка');
     current.tabId = tab.id;
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    let streamId;
+    try {
+      streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    } catch (error) {
+      // Для активной вкладки Chrome допускает вызов без targetTabId.
+      if (!/activeTab|not been invoked|permission|not allowed/i.test(error?.message || '')) throw error;
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (active?.id !== tab.id) throw error;
+      streamId = await chrome.tabCapture.getMediaStreamId();
+    }
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
       video: false,

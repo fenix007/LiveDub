@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import vm from 'node:vm';
 import {
   checkDeepSeek, checkYandex, deepgramUrl, synthesizeYandex, translateDeepSeek, translateYandex, translationPrompt,
 } from '../extension/lib/providers.js';
@@ -25,6 +26,27 @@ test('manifest grants only the API hosts the extension calls', () => {
     'https://translate.api.cloud.yandex.net/*', 'https://tts.api.cloud.yandex.net/*',
   ]);
   assert.ok(manifest.permissions.includes('tabCapture'));
+});
+
+test('action click opens the panel in the clicked tab window', async () => {
+  const calls = [];
+  let onClick;
+  const chrome = {
+    action: { onClicked: { addListener: (callback) => { onClick = callback; } } },
+    sidePanel: {
+      setPanelBehavior: async (behavior) => { calls.push(['behavior', behavior]); },
+      open: async (options) => { calls.push(['open', options]); },
+    },
+    runtime: { onInstalled: { addListener: () => {} } },
+  };
+  vm.runInNewContext(readFileSync(new URL('../extension/background.js', import.meta.url), 'utf8'), { chrome, console });
+  assert.equal(typeof onClick, 'function');
+  onClick({ windowId: 23 });
+  await Promise.resolve();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ['behavior', { openPanelOnActionClick: false }],
+    ['open', { windowId: 23 }],
+  ]);
 });
 
 test('Deepgram URL streams 16 kHz PCM with interim results', () => {
