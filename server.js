@@ -6,15 +6,21 @@ import { readFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import { TOKEN_PROTOCOL, createAuthorizer, parseTokens, tokenFromAuthorization, tokenFromProtocols } from './access.js';
 
 const PORT = Number(process.env.PORT || 3000);
+// 127.0.0.1 на VPS за обратным прокси; по умолчанию — все интерфейсы, как раньше.
+const HOST = process.env.HOST?.trim() || undefined;
 const DG_KEY = process.env.DEEPGRAM_API_KEY;
 const YANDEX_TTS_KEY = process.env.YANDEX_SPEECHKIT_API_KEY?.trim();
 const YANDEX_TRANSLATE_KEY = (process.env.YANDEX_TRANSLATE_API_KEY || process.env.YANDEX_SPEECHKIT_API_KEY)?.trim();
 const YANDEX_STT_KEY = (process.env.YANDEX_STT_API_KEY || process.env.YANDEX_SPEECHKIT_API_KEY)?.trim();
-// Если задан, расширение должно передать его в ?token=: иначе любой, кто достучится
-// до сервера, будет распознавать речь за счёт ключа SpeechKit.
-const STT_TOKEN = process.env.LIVEDUB_STT_TOKEN?.trim();
+// Токены доступа (access.js). Если заданы — или LIVEDUB_REQUIRE_TOKEN=1 на продакшне, —
+// без токена не работают ни распознавание, ни остальные /api/: иначе любой, кто
+// достучится до сервера, будет пользоваться вашими ключами.
+const access = createAuthorizer(parseTokens(process.env.LIVEDUB_STT_TOKENS?.trim(), process.env.LIVEDUB_STT_TOKEN?.trim()),
+  { required: process.env.LIVEDUB_REQUIRE_TOKEN === '1' });
+const clientAddress = (req) => req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
 const YANDEX_TRANSLATE_TIMEOUT_MS = Number(process.env.YANDEX_TRANSLATE_TIMEOUT_MS || 5_000);
 if (!Number.isInteger(YANDEX_TRANSLATE_TIMEOUT_MS) || YANDEX_TRANSLATE_TIMEOUT_MS < 1) {
   throw new Error('YANDEX_TRANSLATE_TIMEOUT_MS должен быть положительным целым числом');
@@ -212,10 +218,9 @@ function translateGemini(prompt, kind) {
   });
 }
 
-if (!DG_KEY) {
-  console.error('Нет DEEPGRAM_API_KEY в окружении (.env)');
-  process.exit(1);
-}
+// Без Deepgram не работает только веб-страница; распознавание SpeechKit для расширения
+// (например, на VPS) Deepgram не нужно.
+if (!DG_KEY) console.warn('Нет DEEPGRAM_API_KEY: веб-страница не сможет распознавать речь, SpeechKit для расширения работает');
 
 const json = (res, code, body) => {
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -234,6 +239,7 @@ const readBody = async (req) => {
 // Короткоживущий JWT для прямого WebSocket браузер → Deepgram.
 // Токен нужен только на момент открытия сокета; ключ не попадает в браузер.
 async function grantDeepgramToken() {
+  if (!DG_KEY) throw new Error('DEEPGRAM_API_KEY не задан на сервере');
   const r = await fetch('https://api.deepgram.com/v1/auth/grant', {
     method: 'POST',
     headers: { Authorization: `Token ${DG_KEY}`, 'content-type': 'application/json' },
@@ -357,6 +363,13 @@ async function translateYandex({ text, source, target }, kind) {
 
 const server = createServer(async (req, res) => {
   try {
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('ok');
+    }
+    if (req.url.startsWith('/api/') && access.enabled && !access.check(tokenFromAuthorization(req.headers.authorization))) {
+      return json(res, 401, { error: 'unauthorized' });
+    }
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       const html = await readFile(new URL('./public/index.html', import.meta.url));
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
@@ -518,14 +531,24 @@ const server = createServer(async (req, res) => {
 let sttSockets = null;
 async function acceptYandexStt(req, socket, head, url) {
   const reject = (status, text) => { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\n\r\n`); };
+  const client = access.check(tokenFromProtocols(req.headers['sec-websocket-protocol']));
+  if (access.enabled && !client) {
+    console.warn(`[stt] отклонено подключение без верного токена: ${clientAddress(req)}`);
+    return reject(401, 'Unauthorized');
+  }
   if (!YANDEX_STT_KEY) return reject(503, 'YANDEX_SPEECHKIT_API_KEY not set');
-  if (STT_TOKEN && url.searchParams.get('token') !== STT_TOKEN) return reject(401, 'Unauthorized');
   const [{ YANDEX_STT_LANGUAGES, attachSocket }, { WebSocketServer }] = await Promise.all([import('./yandex-stt.js'), import('ws')]);
   const language = YANDEX_STT_LANGUAGES[url.searchParams.get('language')];
   const pauseMs = Number(url.searchParams.get('endpointing') || 300);
   if (!language || !(pauseMs >= 100 && pauseMs <= 3000)) return reject(400, 'Bad Request');
-  sttSockets ??= new WebSocketServer({ noServer: true });
-  sttSockets.handleUpgrade(req, socket, head, (ws) => attachSocket(ws, { apiKey: YANDEX_STT_KEY, language, pauseMs }));
+  // Браузер ждёт, что сервер подтвердит протокол, в котором пришёл токен.
+  sttSockets ??= new WebSocketServer({ noServer: true, handleProtocols: (protocols) => protocols.has(TOKEN_PROTOCOL) && TOKEN_PROTOCOL });
+  sttSockets.handleUpgrade(req, socket, head, (ws) => {
+    const started = Date.now();
+    console.log(`[stt] подключение: ${client ?? 'без токена'} (${clientAddress(req)})`);
+    ws.on('close', () => console.log(`[stt] отключение: ${client ?? 'без токена'}, ${Math.round((Date.now() - started) / 1000)} с`));
+    attachSocket(ws, { apiKey: YANDEX_STT_KEY, language, pauseMs });
+  });
 }
 
 server.on('upgrade', (req, socket, head) => {
@@ -537,12 +560,13 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`Открой http://localhost:${PORT} в Chrome/Edge`);
   console.log(`LLM-перевод: ${LLM_KEY ? `включён (${LLM_MODEL} @ ${LLM_BASE})` : 'выключен — только встроенный переводчик Chrome'}`);
   console.log(`Gemini-перевод: ${GEMINI_ENABLED ? `включён (${GEMINI_MODEL})` : 'выключен'}`);
   console.log(`DeepSeek-перевод: ${DEEPSEEK_KEY ? `включён (${DEEPSEEK_MODEL})` : 'выключен'}`);
-  console.log(`Распознавание SpeechKit для расширения: ${YANDEX_STT_KEY ? `ws://localhost:${PORT}/api/stt/yandex${STT_TOKEN ? ' (с токеном)' : ''}` : 'выключено'}`);
+  console.log(`Распознавание SpeechKit для расширения: ${YANDEX_STT_KEY ? `ws://localhost:${PORT}/api/stt/yandex` : 'выключено'}`);
+  console.log(`Доступ к /api/: ${access.enabled ? 'только с токеном' : 'без токена'}`);
 });
 
 process.on('exit', () => geminiWorker?.kill());

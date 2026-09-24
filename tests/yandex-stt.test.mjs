@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createPauseDetector, createStreamingRecognition, sessionOptions, toDeepgramMessage } from '../yandex-stt.js';
-import { yandexSttUrl } from '../extension/lib/providers.js';
+import { SERVER_TOKEN_PATTERN, serverProtocols, yandexSttUrl } from '../extension/lib/providers.js';
 
 const frame = (amplitude, ms = 40) => Int16Array.from({ length: 16 * ms }, (_, i) => (i % 2 ? amplitude : -amplitude));
 const pcm = (amplitude, ms = 40) => Buffer.from(frame(amplitude, ms).buffer);
@@ -76,12 +76,15 @@ test('streaming recognition sends eou on pauses and rotates the session with tim
   assert.equal(messages.length, 1, 'после close сообщения не передаются');
 });
 
-test('extension builds the proxy URL with ws scheme, language, pause and optional token', () => {
+test('extension builds the proxy URL without the token and sends the token as a subprotocol', () => {
   const plain = new URL(yandexSttUrl('http://localhost:3000', 'en', { endpointing: 500 }));
   assert.equal(plain.href.split('?')[0], 'ws://localhost:3000/api/stt/yandex');
   assert.equal(plain.searchParams.get('endpointing'), '500');
-  assert.equal(plain.searchParams.has('token'), false);
-  const secure = new URL(yandexSttUrl('https://livedub.example', 'ru', { token: 's3cret' }));
+  const secure = new URL(yandexSttUrl('https://speechkit.example', 'ru', { token: 'x'.repeat(40) }));
   assert.equal(secure.protocol, 'wss:');
-  assert.equal(secure.searchParams.get('token'), 's3cret');
+  assert.equal(secure.search.includes('x'.repeat(40)), false, 'токен не должен попадать в адрес');
+  assert.deepEqual(serverProtocols('a'.repeat(40)), ['livedub', 'a'.repeat(40)]);
+  assert.equal(serverProtocols(''), undefined);
+  assert.equal(SERVER_TOKEN_PATTERN.test('abc'), false);
+  assert.equal(SERVER_TOKEN_PATTERN.test('0f'.repeat(32)), true);
 });

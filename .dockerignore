@@ -1,0 +1,8 @@
+*
+!package.json
+!package-lock.json
+!server.js
+!yandex-stt.js
+!access.js
+!proto/
+!public/

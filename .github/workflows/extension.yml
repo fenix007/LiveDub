@@ -29,7 +29,7 @@ jobs:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
 
       - name: Syntax
-        run: for file in server.js yandex-stt.js extension/*.js extension/lib/*.js extension/content/*.js bench/*.mjs bench/*.js; do node --check "$file"; done
+        run: for file in server.js yandex-stt.js access.js extension/*.js extension/lib/*.js extension/content/*.js bench/*.mjs bench/*.js; do node --check "$file"; done
 
       - name: Tests
         run: node --test tests/*.test.mjs
