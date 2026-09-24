@@ -22,7 +22,8 @@ export function subtitleWords(vtt, startSeconds = 0, durationSeconds = Infinity)
     const raw = lines.slice(cueIndex + 1).join(' ')
       .replace(/<[^>]*>/g, ' ').replace(/\[[^\]]*\]/g, ' ')
       .replace(/&amp;/gi, '&').replace(/&(?:#39|apos);/gi, "'")
-      .replace(/&quot;/gi, '"').replace(/&nbsp;/gi, ' ');
+      .replace(/&quot;/gi, '"').replace(/&nbsp;/gi, ' ')
+      .replace(/&(?:gt|lt);/gi, ' ');
     const cue = normalizeWords(raw);
     if (!cue.length) continue;
     // Автоматические субтитры YouTube часто повторяют хвост предыдущего cue.
@@ -33,6 +34,15 @@ export function subtitleWords(vtt, startSeconds = 0, durationSeconds = Infinity)
     words.push(...cue.slice(overlap));
   }
   return words;
+}
+
+export function json3Words(captions, startSeconds = 0, durationSeconds = Infinity) {
+  const firstMs = startSeconds * 1000, lastMs = (startSeconds + durationSeconds) * 1000;
+  return (captions.events ?? []).flatMap((event) => (event.segs ?? []).flatMap((segment) => {
+    const atMs = event.tStartMs + (segment.tOffsetMs ?? 0);
+    return atMs >= firstMs && atMs < lastMs
+      ? normalizeWords(segment.utf8.replaceAll('>>', ' ')) : [];
+  }));
 }
 
 export function prepareYoutube({ url, language, startSeconds, durationSeconds, outDir }) {
@@ -55,17 +65,25 @@ export function prepareYoutube({ url, language, startSeconds, durationSeconds, o
   try {
     const info = JSON.parse(run('yt-dlp', ['--dump-single-json', '--skip-download', '--no-playlist', url]));
     const manual = Boolean(info.subtitles?.[language]?.length);
-    const automatic = Boolean(info.automatic_captions?.[language]?.length);
+    const originalLanguage = `${language}-orig`;
+    const captionLanguage = manual ? language :
+      info.automatic_captions?.[originalLanguage]?.length ? originalLanguage : language;
+    const automatic = Boolean(info.automatic_captions?.[captionLanguage]?.length);
     if (!manual && !automatic) {
       const available = Object.keys({ ...info.subtitles, ...info.automatic_captions }).slice(0, 25).join(', ');
       throw new Error(`Нет субтитров языка ${language}. Доступны: ${available || 'нет'}`);
     }
+    const captionFormat = !manual && info.automatic_captions[captionLanguage].some((format) => format.ext === 'json3')
+      ? 'json3' : 'vtt';
     const base = join(workDir, 'youtube-reference');
     run('yt-dlp', ['--no-playlist', '--skip-download', manual ? '--write-subs' : '--write-auto-subs',
-      '--sub-langs', language, '--sub-format', 'vtt', '-o', `${base}.%(ext)s`, url]);
-    const subtitle = readdirSync(workDir).find((name) => name.startsWith('youtube-reference.') && name.endsWith('.vtt'));
-    if (!subtitle) throw new Error('yt-dlp не сохранил субтитры VTT');
-    const words = subtitleWords(readFileSync(join(workDir, subtitle), 'utf8'), startSeconds, durationSeconds);
+      '--sub-langs', captionLanguage, '--sub-format', captionFormat, '-o', `${base}.%(ext)s`, url]);
+    const subtitle = readdirSync(workDir).find((name) => name.startsWith('youtube-reference.') && name.endsWith(`.${captionFormat}`));
+    if (!subtitle) throw new Error(`yt-dlp не сохранил субтитры ${captionFormat}`);
+    const contents = readFileSync(join(workDir, subtitle), 'utf8');
+    const words = captionFormat === 'json3'
+      ? json3Words(JSON.parse(contents), startSeconds, durationSeconds)
+      : subtitleWords(contents, startSeconds, durationSeconds);
     if (!words.length) throw new Error('В выбранном фрагменте нет слов в субтитрах');
 
     run('yt-dlp', ['--no-playlist', '-f', 'bestaudio', '-o', `${join(workDir, 'youtube-audio')}.%(ext)s`, url]);
@@ -75,7 +93,8 @@ export function prepareYoutube({ url, language, startSeconds, durationSeconds, o
     run('ffmpeg', ['-y', '-loglevel', 'error', '-ss', String(startSeconds), '-t', String(durationSeconds),
       '-i', join(workDir, audio), '-af', 'apad=pad_dur=2', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', wavPath]);
     return { wavPath, reference: words.join(' '), title: info.title, videoId: info.id,
-      captionKind: manual ? 'ручные' : 'автоматические', durationMs: (durationSeconds + 2) * 1000, workDir };
+      captionKind: manual ? 'ручные' : 'автоматические', captionLanguage, captionFormat,
+      durationMs: (durationSeconds + 2) * 1000, workDir };
   } catch (error) {
     rmSync(workDir, { recursive: true, force: true });
     throw error;

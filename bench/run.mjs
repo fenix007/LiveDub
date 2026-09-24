@@ -148,7 +148,7 @@ async function main() {
   const audio = youtube ?? buildAudio(join(root, 'scenario.json'), outDir);
   const timings = youtube ? { source: options.language, target: options.language === 'en' ? 'ru' : 'en',
     durationMs: youtube.durationMs, lines: [] } : JSON.parse(readFileSync(audio.timingsPath, 'utf8'));
-  if (youtube) console.log(`YouTube: ${youtube.title} (${youtube.videoId}); субтитры: ${youtube.captionKind}, ${options.language}; фрагмент ${options.start}–${options.start + options.seconds} с`);
+  if (youtube) console.log(`YouTube: ${youtube.title} (${youtube.videoId}); субтитры: ${youtube.captionKind}, ${youtube.captionLanguage}, ${youtube.captionFormat}; фрагмент ${options.start}–${options.start + options.seconds} с`);
   const extDir = prepareExtension(audio.wavPath);
 
   const configs = options.stt.flatMap((sttEngine) => options.final.flatMap((finalEngine) => options.draft.flatMap((draftEngine) =>
@@ -158,6 +158,7 @@ async function main() {
     startedAt: new Date().toISOString(), durationMs: timings.durationMs, runs: [] };
   if (youtube) report.reference = { url: options.youtube, language: options.language,
     startSeconds: options.start, durationSeconds: options.seconds, captionKind: youtube.captionKind,
+    captionLanguage: youtube.captionLanguage, captionFormat: youtube.captionFormat,
     text: youtube.reference };
   try {
     for (const config of configs) {
