@@ -34,7 +34,7 @@
     <fieldset>
       <legend>Сервер LiveDub — распознавание Yandex SpeechKit</legend>
       <label>Адрес сервера<input id="serverUrl" type="url" autocomplete="off"></label>
-      <label>Токен (если на сервере задан <code>LIVEDUB_STT_TOKEN</code>)<input id="serverToken" type="password" autocomplete="off"></label>
+      <label>Токен доступа (выдаёт администратор сервера; для локального сервера без токенов — пусто)<input id="serverToken" type="password" autocomplete="off"></label>
       <span class="result">SpeechKit принимает поток только по gRPC, поэтому звук идёт через <code>server.js</code>
         (<code>npm install</code>, затем <code>make start</code>). Ключ SpeechKit с ролью <code>ai.speechkit-stt.user</code> хранится на сервере.</span>
       <div class="check"><button type="button" data-check="server">Проверить</button><span class="result" data-result="server"></span></div>

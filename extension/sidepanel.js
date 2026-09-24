@@ -3,7 +3,7 @@
 // озвучка и субтитры. Закрытие панели останавливает перевод.
 import { DEFAULT_PREFS, loadKeys, loadPrefs, savePrefs } from './lib/settings.js';
 import { joinText, splitAtSentence, stableWords, wordCount } from './lib/text.js';
-import { ENDPOINTING_CHOICES, openDeepgram, openYandexStt, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
+import { ENDPOINTING_CHOICES, SERVER_TOKEN_PATTERN, openDeepgram, openYandexStt, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
 import { startTabAudio } from './lib/capture.js';
 import { createSpeech } from './lib/speech.js';
 import { createLatencyStats } from './lib/stats.js';
@@ -100,6 +100,9 @@ function syncControls() {
 function sttProblem() {
   if (prefs.sttEngine === 'deepgram' && !keys.deepgramKey) return 'Укажите ключ Deepgram в «Ключи API» или выберите SpeechKit';
   if (prefs.sttEngine === 'yandex' && !keys.serverUrl) return 'Укажите адрес сервера LiveDub в «Ключи API»';
+  if (prefs.sttEngine === 'yandex' && keys.serverToken && !SERVER_TOKEN_PATTERN.test(keys.serverToken)) {
+    return 'Токен сервера LiveDub: от 32 символов, только латиница, цифры и . _ ~ -';
+  }
   return '';
 }
 

@@ -23,14 +23,20 @@ export const openDeepgram = (key, language, options) => new WebSocket(deepgramUr
 
 // Yandex SpeechKit принимает поток только по gRPC, поэтому звук идёт через сервер
 // LiveDub (server.js). Сервер отвечает сообщениями в формате Deepgram.
-export function yandexSttUrl(serverUrl, language, { endpointing = 300, token = '' } = {}) {
+export function yandexSttUrl(serverUrl, language, { endpointing = 300 } = {}) {
   const url = new URL('/api/stt/yandex', serverUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.search = new URLSearchParams({ language, endpointing: String(endpointing), ...(token ? { token } : {}) });
+  url.search = new URLSearchParams({ language, endpointing: String(endpointing) });
   return url.href;
 }
 
-export const openYandexStt = (serverUrl, language, options) => new WebSocket(yandexSttUrl(serverUrl, language, options));
+// Токен идёт в Sec-WebSocket-Protocol, а не в адресе: адреса попадают в логи прокси.
+// Протокол допускает только символы токена HTTP — так же проверяет сервер (access.js).
+export const SERVER_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,256}$/;
+export const serverProtocols = (token) => (token ? ['livedub', token] : undefined);
+
+export const openYandexStt = (serverUrl, language, { token, ...options } = {}) =>
+  new WebSocket(yandexSttUrl(serverUrl, language, options), serverProtocols(token));
 
 // Перевод через LLM: пара предыдущих реплик как контекст, чтобы
 // местоимения и термины переводились согласованно.
@@ -138,9 +144,12 @@ export function checkServer(serverUrl, token, WebSocketImpl = WebSocket) {
   return new Promise((resolve, reject) => {
     let sock;
     try {
-      sock = new WebSocketImpl(yandexSttUrl(serverUrl, 'en', { token }));
-    } catch {
-      return reject(new Error('Некорректный адрес сервера'));
+      if (token && !SERVER_TOKEN_PATTERN.test(token)) throw new Error('token');
+      sock = new WebSocketImpl(yandexSttUrl(serverUrl, 'en'), serverProtocols(token));
+    } catch (error) {
+      return reject(new Error(error.message === 'token'
+        ? 'Токен: от 32 символов, только латиница, цифры и . _ ~ -'
+        : 'Некорректный адрес сервера'));
     }
     const timer = setTimeout(() => { sock.close(); reject(new Error('Сервер не ответил за 8 секунд')); }, 8000);
     sock.onopen = () => {
