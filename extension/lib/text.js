@@ -70,3 +70,25 @@ export function splitAtSentence(text, minWords = 3) {
   const done = text.slice(0, cut).trim(), rest = text.slice(cut).trim();
   return wordCount(done) >= minWords && rest ? { done, rest } : null;
 }
+
+// Продолжает ли text фразу prefix: регистр и знаки препинания не важны,
+// поэтому «Where is he?» из финала продолжает черновое «where is he».
+export function continuesText(text, prefix) {
+  const a = speechWords(prefix).map(comparableWord), b = speechWords(text).map(comparableWord);
+  return a.length <= b.length && a.every((word, i) => word === b[i]);
+}
+
+// Служебные слова, на которых фраза явно не закончена: «this technology is», «agent space in».
+const DANGLING = new Set(('a an the and or but so to of in on at for with from by into onto about as than that which who whose ' +
+  'is are was were be been am will would can could should shall may might must do does did have has had ' +
+  'i we you they he she it my our your their its this these those not very more most just also like um uh ' +
+  'и или но а что чтобы как в во на с со к ко по о об от до из за для при под над без у это этот эта эти ' +
+  'мы вы они он она я не очень еще ещё уже который которая которые').split(' '));
+
+// Пауза после такой фразы — скорее запинка, чем конец мысли: короткий обрывок
+// или последнее слово служебное. Точка в конце снимает подозрение.
+export function looksUnfinished(text, minWords = 4) {
+  const words = speechWords(text);
+  if (!words.length || /[.?!…]["»”)]*$/u.test(text.trim())) return false;
+  return words.length < minWords || DANGLING.has(comparableWord(words.at(-1)));
+}

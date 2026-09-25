@@ -41,4 +41,6 @@ main { padding: 4px 12px 24px; }
 .tr.pending { color: var(--muted); font-style: italic; font-size: 14px; }
 .row.draft .src, .row.draft .tr { opacity: .7; }
 .row.draft .tr:not(.pending)::after { content: ' · черновик'; color: var(--muted); font-size: 11px; }
+.src .unstable { opacity: .55; font-style: italic; }
+.tr.stale { opacity: .4; text-decoration: line-through; text-decoration-color: var(--muted); }
 .ms { color: var(--muted); font-size: 11px; margin-left: 6px; font-variant-numeric: tabular-nums; }

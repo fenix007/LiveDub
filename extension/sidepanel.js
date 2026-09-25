@@ -2,7 +2,7 @@
 // или SpeechKit через сервер LiveDub), перевод,
 // озвучка и субтитры. Закрытие панели останавливает перевод.
 import { DEFAULT_PREFS, loadKeys, loadPrefs, savePrefs } from './lib/settings.js';
-import { joinText, splitAtSentence, stableWords, wordCount } from './lib/text.js';
+import { continuesText, joinText, looksUnfinished, splitAtSentence, stableWords, wordCount } from './lib/text.js';
 import { ENDPOINTING_CHOICES, SERVER_TOKEN_PATTERN, openDeepgram, openYandexStt, synthesizeYandex, translateDeepSeek, translateYandex } from './lib/providers.js';
 import { startTabAudio } from './lib/capture.js';
 import { createSpeech } from './lib/speech.js';
@@ -13,6 +13,7 @@ const $ = (id) => document.getElementById(id);
 const log = $('log'), statusEl = $('status');
 const DRAFT_INTERVAL_MS = 1200;
 const DRAFT_MIN_WORDS = 3;
+const PAUSE_HOLD_MS = 1500;
 const DRAFT_NEW_WORDS = 3;
 // Yandex Translate отвечает быстро: черновик обновляется чаще и после меньшего прироста.
 const YANDEX_DRAFT_INTERVAL_MS = 650;
@@ -29,10 +30,12 @@ let captureGeneration = 0;
 let buffer = [];          // финальные сегменты текущей фразы
 let latestInterim = '';
 let phrase = null;
+let phraseSeq = 0; // номер фразы: субтитры на странице отличают новую фразу от правки текущей
 let history = [];         // последние оригиналы — контекст для LLM
 let activeRemoteDrafts = 0;
 let keepAliveTimer = null, keepAliveSocket = null;
 let audioClock = createAudioClock();
+let pauseHoldTimer = null; // отложенное закрытие фразы, оборванной на полуслове
 let phraseWordEnd = null; // конец последнего слова текущей фразы, секунды звука
 const eagerFinals = { sent: 0, used: 0 };
 const latency = createLatencyStats();
@@ -207,9 +210,39 @@ async function sendSubtitle(tabId, message) {
   }
 }
 
-function showSubtitle(state, translated, final) {
+// original — тот текст, с которого сделан перевод, а не более свежая гипотеза распознавания.
+function showSubtitle(state, translated, final, original = state.finalText || state.sourceText) {
   if (!prefs.subtitles || !session || state.captureGeneration !== captureGeneration) return;
-  sendSubtitle(session.tabId, { type: 'tt-subtitle', translation: translated, original: state.finalText || state.sourceText, final });
+  sendSubtitle(session.tabId, { type: 'tt-subtitle', id: state.id, translation: translated, original, final });
+}
+
+// Deepgram может переписать гипотезу целиком («where is he» → «launsy»). Тогда
+// показанный перевод относится к тексту, которого больше нет: приглушаем его
+// в панели и на странице до прихода перевода по новому тексту.
+function markStale(state) {
+  const current = state.final ? state.finalText : state.sourceText;
+  const stale = !!state.lastTranslation && !continuesText(current, state.lastSuccessText);
+  if (stale === state.stale) return;
+  state.stale = stale;
+  state.row.querySelector('.tr').classList.toggle('stale', stale);
+  if (prefs.subtitles && session && state.captureGeneration === captureGeneration) {
+    sendToTab(session.tabId, { type: 'tt-subtitle-stale', id: state.id, stale });
+  }
+}
+
+// Закреплённая часть оригинала обычным цветом, неустоявшийся хвост гипотезы — бледнее.
+function showSource(state, text, stableText = text) {
+  const el = state.row.querySelector('.src');
+  const stable = stableText && text.startsWith(stableText) ? stableText : '';
+  el.textContent = stable;
+  const tail = text.slice(stable.length).trim();
+  if (tail) {
+    const span = document.createElement('span');
+    span.className = 'unstable';
+    span.textContent = stable ? ` ${tail}` : tail;
+    el.appendChild(span);
+  }
+  markStale(state);
 }
 
 function showCaptureMetrics(current) {
@@ -322,12 +355,12 @@ function ensurePhrase() {
   row.innerHTML = '<div class="src"></div><div class="tr pending">перевожу…</div>';
   log.appendChild(row);
   scrollDown();
-  phrase = { row, sourceText: '', stableText: '', lastRequestText: '', lastSuccessText: '', lastRequestAt: null,
+  phrase = { id: ++phraseSeq, row, sourceText: '', stableText: '', lastRequestText: '', lastSuccessText: '', lastRequestAt: null,
     revision: 0, inFlight: null, timer: null, final: false, context: history.slice(-3),
     captureGeneration, ttsWords: [], ttsCandidate: '', ttsCandidateFinal: false,
     ttsPreviousDraft: null, ttsRewritten: false,
     ttsDropped: false, ttsUseServerFinal: false, finalText: '',
-    lastTranslation: '', lastFinalTranslation: '', eager: null, flushedAt: null, endpointMs: null };
+    lastTranslation: '', lastFinalTranslation: '', eager: null, flushedAt: null, endpointMs: null, stale: false };
   return phrase;
 }
 
@@ -344,8 +377,10 @@ function renderTranslation(state, translated, elapsed, kind, sourceText) {
   const ms = document.createElement('span');
   ms.className = 'ms'; ms.textContent = `${Math.round(elapsed)} мс`;
   el.appendChild(ms);
+  state.stale = false;
+  el.classList.remove('stale');
   scrollDown();
-  showSubtitle(state, translated, final);
+  showSubtitle(state, translated, final, sourceText);
   if (!splitVoice() || state.ttsUseServerFinal || (yandexVoice() ? final : !final)) {
     speech.speak(state, translated, final);
   }
@@ -407,13 +442,14 @@ function updatePhrase(sourceText, stableText) {
   if (!sourceText) return;
   const state = ensurePhrase();
   state.sourceText = sourceText;
-  state.row.querySelector('.src').textContent = sourceText;
   state.stableText = stableText;
+  showSource(state, sourceText, stableText);
   scheduleDraft(state);
 }
 
 // Закрепляем ту же строку окончательным текстом; поздние черновые ответы игнорируются.
 function flush(endpointMs = null) {
+  cancelPauseHold();
   const text = joinText(buffer.join(' '), latestInterim);
   buffer = [];
   latestInterim = '';
@@ -429,7 +465,7 @@ function flush(endpointMs = null) {
   state.final = true;
   state.finalText = text;
   state.row.classList.remove('draft');
-  state.row.querySelector('.src').textContent = text;
+  showSource(state, text);
   if (splitVoice()) {
     // Даже при совпадении текста с черновиком нужен ответ финального движка.
     requestTranslation(state, text);
@@ -523,12 +559,13 @@ function handleDeepgram(msg) {
       phraseWordEnd = lastWordEnd(msg); // промежуточные слова тоже войдут во фразу
     }
     if (msg.is_final) {
-      if (text) buffer.push(text);
+      if (text) { buffer.push(text); cancelPauseHold(); }
       latestInterim = '';
       const joined = buffer.join(' ');
       updatePhrase(joined, joined);
       // конец фразы: пауза (speech_final) или закреплённый текст кончается предложением
-      if (msg.speech_final || /[.?!…]$/.test(text)) flush(endpointLag());
+      if (/[.?!…]$/.test(text)) flush(endpointLag());
+      else if (msg.speech_final) flushOnPause();
       // законченные предложения внутри — сразу в финал, хвост начинает следующую фразу
       else if (commitSentences(joined)) return;
       else if (wordCount(joined) > 30) flush(null); // длинный монолог без точек
@@ -540,8 +577,22 @@ function handleDeepgram(msg) {
     }
   } else if (msg.type === 'UtteranceEnd') {
     if (Number.isFinite(msg.last_word_end)) phraseWordEnd = msg.last_word_end;
-    flush(endpointLag());
+    flushOnPause();
   }
+}
+
+// Пауза посреди мысли («this technology is ... used by») не закрывает фразу:
+// иначе перевод и субтитры рвутся на обрывки. Ждём продолжения, но недолго —
+// если человек замолчал, фраза уйдёт в финал сама.
+function flushOnPause() {
+  const text = joinText(buffer.join(' '), latestInterim);
+  if (!looksUnfinished(text) || wordCount(text) > 30) return flush(endpointLag());
+  if (!pauseHoldTimer) pauseHoldTimer = setTimeout(() => { pauseHoldTimer = null; flush(endpointLag()); }, PAUSE_HOLD_MS);
+}
+
+function cancelPauseHold() {
+  clearTimeout(pauseHoldTimer);
+  pauseHoldTimer = null;
 }
 
 // Закрывает фразу на последней границе предложения и переносит хвост в новую.

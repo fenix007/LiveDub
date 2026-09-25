@@ -262,3 +262,23 @@ test('finished sentences split off a committed transcript, abbreviations do not'
   assert.equal(splitAtSentence('I met Mr. Smith and Dr. Brown today and'), null);
   assert.deepEqual(splitAtSentence('Is this ok for you? "Yes." And then'), { done: 'Is this ok for you? "Yes."', rest: 'And then' });
 });
+
+test('a pause after a dangling word or a short scrap does not close the phrase', async () => {
+  const { looksUnfinished } = await import('../extension/lib/text.js');
+  assert.equal(looksUnfinished('this technology is'), true);
+  assert.equal(looksUnfinished('agent space in'), true);
+  assert.equal(looksUnfinished('models voices in'), true);
+  assert.equal(looksUnfinished('u s genesis'), true);          // короче четырёх слов
+  assert.equal(looksUnfinished('a bunch of products from aws'), false);
+  assert.equal(looksUnfinished('you can tell it s like a machine'), false);
+  assert.equal(looksUnfinished('And this is.'), false);         // точка — конец мысли
+});
+
+test('a rewritten recognition hypothesis no longer matches the shown translation', async () => {
+  const { continuesText } = await import('../extension/lib/text.js');
+  assert.equal(continuesText('Where is he? Right there', 'where is he'), true);
+  assert.equal(continuesText('where is he', 'where is he'), true);
+  assert.equal(continuesText('launsy', 'where is he'), false);
+  assert.equal(continuesText('where is', 'where is he'), false);
+  assert.equal(continuesText('anything', ''), true);
+});
