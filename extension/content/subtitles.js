@@ -25,6 +25,8 @@
   const PAGE_MIN_MS = 2500;
   const HIDE_AFTER_DRAFT_MS = 12000;
   const TRANSLATION_LINES = 3;
+  // Страница держится хотя бы столько, даже если текст уже не влезает.
+  const PAGE_DWELL_MS = 1200;
 
   const host = document.createElement('div');
   host.style.cssText = 'all:initial;position:fixed;left:0;top:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
@@ -44,21 +46,35 @@
       .stale { opacity: .35; }
       .fresh { animation: fresh .35s ease-out; }
       @keyframes fresh { from { opacity: .15; } to { opacity: 1; } }
+      .ghost { position: absolute; inset: 0; pointer-events: none; animation: page-out .22s ease-in forwards; }
+      .ghost * { animation: none !important; }
+      .flip > span { animation: page-in .3s ease-out .1s both; }
+      @keyframes page-out { to { opacity: 0; transform: translateY(-.3em); } }
+      @keyframes page-in { from { opacity: 0; } to { opacity: 1; } }
     </style>
     <div class="box off"><div class="tr"></div><div class="src"></div></div>`;
   const box = root.querySelector('.box');
 
   const words = (text) => (text || '').split(/\s+/).filter(Boolean);
 
-  // Выводит сегменты (фразы) по словам с позиции start. Слово, вылезшее за нижний
-  // край, становится началом новой страницы. Слова, которых не было в прошлом
-  // выводе этой фразы (после совпавшего начала), плавно проявляются.
-  const createPager = (el) => {
+  // Выводит сегменты (фразы) по словам с позиции start — первого слова страницы.
+  // Страница листается, когда текст не влез или когда новая фраза начинается уже
+  // на нижней строке: так смена страницы чаще приходится на границу фраз.
+  // Новая страница начинается с начала фразы, если та влезает, иначе с первого
+  // нового слова; не влезшее ждёт следующих страниц (turn()). Между сменами
+  // страниц не меньше minDwellMs, смена плавная: старая страница уходит, новая
+  // проявляется. Слова, которых не было в прошлом выводе фразы, проявляются.
+  const createPager = (el, { lines, minDwellMs = 0 }) => {
     let start = null; // { key, index } — первое слово страницы
     let shown = new Map(); // key -> слова, выведенные в прошлый раз
-    let next = null; // { key, index } — начало следующей страницы, если текст не влез
+    let next = null; // { key, index } — начало следующей страницы
+    let nextAt = 0; // раньше этого момента следующую страницу не показывать
+    let flippedAt = -Infinity;
+    let flipTimer = null;
     let lastSegments = [];
+    const sameWord = (a, b) => a.key === b.key && a.index === b.index;
     const draw = (segments, freshFrom) => {
+      const ghost = el.querySelector(':scope > .ghost');
       el.textContent = '';
       const spans = [];
       const from = segments.findIndex((s) => s.key === start.key);
@@ -71,26 +87,52 @@
           if (spans.length) wrap.append(' ');
           const span = document.createElement('span');
           span.textContent = word;
-          const fresh = index >= freshFrom.get(segment.key);
+          const fresh = index >= (freshFrom.get(segment.key) ?? 0);
           if (fresh) span.className = 'fresh';
           wrap.append(span);
-          spans.push({ span, key: segment.key, index, fresh });
+          spans.push({ span, key: segment.key, index, fresh, join: segment.join });
         });
         el.append(wrap);
       }
+      if (ghost) el.append(ghost);
       return spans;
     };
+    const visible = (span) => span.offsetTop + span.offsetHeight <= el.clientHeight + 1;
+    const overflowAt = (spans) => spans.findIndex(({ span }) => !visible(span));
+    // Старая страница уходит вверх и гаснет поверх новой, новая проявляется.
+    const animateFlip = (oldHtml) => {
+      flippedAt = performance.now();
+      el.querySelector(':scope > .ghost')?.remove();
+      const ghost = document.createElement('div');
+      ghost.className = 'ghost';
+      ghost.innerHTML = oldHtml;
+      ghost.querySelector(':scope > .ghost')?.remove();
+      ghost.addEventListener('animationend', () => ghost.remove());
+      el.append(ghost);
+      el.classList.remove('flip');
+      void el.offsetWidth; // перезапуск анимации
+      el.classList.add('flip');
+      clearTimeout(flipTimer);
+      flipTimer = setTimeout(() => el.classList.remove('flip'), 500);
+    };
     return {
-      reset() { start = null; next = null; shown = new Map(); el.textContent = ''; },
+      reset() {
+        start = null; next = null; nextAt = 0; shown = new Map(); el.textContent = '';
+        el.classList.remove('flip');
+      },
       render(segments) {
         segments = segments.filter((s) => s.words.length);
         next = null;
+        nextAt = 0;
         if (!segments.length) return this.reset();
         lastSegments = segments;
+        const oldHtml = el.innerHTML;
         // Пропала фраза, с которой начиналась страница (временный хвост) — страница
         // продолжается с последней фразы, а не возвращается к уже прочитанному.
+        const hadStart = start && segments.some((s) => s.key === start.key);
+        const prevStart = hadStart ? start : null;
         if (!start) start = { key: segments[0].key, index: 0 };
-        else if (!segments.some((s) => s.key === start.key)) start = { key: segments.at(-1).key, index: 0 };
+        else if (!hadStart) start = { key: segments.at(-1).key, index: 0 };
         const freshFrom = new Map();
         for (const s of segments) {
           const prev = shown.get(s.key) || [];
@@ -100,20 +142,21 @@
         }
         // Порядок слова во всём тексте: какая фраза, какое слово в ней.
         const order = ({ key, index }) => segments.findIndex((s) => s.key === key) * 1e6 + index;
-        const overflowAt = (spans) => {
-          const limit = el.clientHeight + 1;
-          return spans.findIndex(({ span }) => span.offsetTop + span.offsetHeight > limit);
-        };
         let spans = draw(segments, freshFrom);
         let overflow = overflowAt(spans);
-        if (overflow > 0) {
+        // Первое появление новой фразы на нижней строке — повод начать её с новой страницы.
+        const lastLineTop = el.clientHeight * (lines - 1) / lines - 1;
+        const opener = spans.find((s) => s.index === 0 && !s.join && s.key !== start.key &&
+          !shown.has(s.key) && s.span.offsetTop >= lastLineTop);
+        if (overflow > 0 || opener) {
           // Новая страница начинается с начала фразы, если она влезает, иначе с первого
           // нового слова: слова, пришедшие одним куском с переполнением, не должны
-          // пропасть, не показавшись. Без новых слов (повторная отрисовка, другая ширина)
-          // страница не листается: недочитанное покажет turn().
+          // пропасть, не показавшись. Без новых слов (повторная отрисовка, другая
+          // ширина) страница не листается: недочитанное покажет turn().
           const fresh = spans.find((s) => s.fresh);
-          const candidates = (fresh ? [{ key: fresh.key, index: 0 }, fresh] : [])
-            .filter((c) => order(c) > order(start) && order(c) <= order(spans[overflow]));
+          const limit = overflow > 0 ? order(spans[overflow]) : Infinity;
+          const candidates = [opener, fresh && { key: fresh.key, index: 0 }, fresh]
+            .filter((c) => c && order(c) > order(start) && order(c) <= limit);
           for (const candidate of candidates) {
             start = { key: candidate.key, index: candidate.index };
             spans = draw(segments, freshFrom);
@@ -133,27 +176,45 @@
           }
           if (overflow > 0) next = { key: spans[overflow].key, index: spans[overflow].index };
         }
+        if (prevStart && !sameWord(prevStart, start)) {
+          const wait = flippedAt + minDwellMs - performance.now();
+          if (wait > 0) {
+            // Страница только что сменилась: следующую покажем чуть позже, а пока
+            // новые слова дописываются на текущую (не влезшие — ждут).
+            next = start;
+            nextAt = performance.now() + wait;
+            start = prevStart;
+            draw(segments, freshFrom);
+          } else {
+            animateFlip(oldHtml);
+          }
+        } else if (!prevStart && oldHtml && start) {
+          animateFlip(oldHtml);
+        }
         shown = new Map(segments.map((s) => [s.key, s.words]));
       },
       // Перелистывает на следующую страницу недочитанного текста.
       turn() {
         if (!next) return;
+        const oldHtml = el.innerHTML;
         start = next;
         next = null;
-        const spans = draw(lastSegments, new Map(lastSegments.map((s) => [s.key, 0])));
-        const limit = el.clientHeight + 1;
-        const overflow = spans.findIndex(({ span }) => span.offsetTop + span.offsetHeight > limit);
+        nextAt = 0;
+        const spans = draw(lastSegments, new Map(lastSegments.map((s) => [s.key, s.words.length])));
+        const overflow = overflowAt(spans);
         if (overflow > 0) next = { key: spans[overflow].key, index: spans[overflow].index };
+        animateFlip(oldHtml);
       },
       hasMore: () => !!next,
-      wordsOnPage: () => [...el.querySelectorAll('span span')]
-        .filter((span) => span.offsetTop + span.offsetHeight <= el.clientHeight + 1).length,
+      // Через сколько можно листать: пауза после прошлой смены или время на чтение.
+      turnDelay: (msPerWord, minMs) => nextAt ? Math.max(0, nextAt - performance.now()) : Math.max(minMs,
+        [...el.querySelectorAll(':scope > span > span')].filter(visible).length * msPerWord),
       startKey: () => start?.key,
     };
   };
 
-  const translationPager = createPager(root.querySelector('.tr'));
-  const sourcePager = createPager(root.querySelector('.src'));
+  const translationPager = createPager(root.querySelector('.tr'), { lines: TRANSLATION_LINES, minDwellMs: PAGE_DWELL_MS });
+  const sourcePager = createPager(root.querySelector('.src'), { lines: 1 });
 
   let phrases = []; // { id, words, original, final, stale, rewroteAt }
   let carry = null; // { words, until } — хвост после укоротившего финала
@@ -169,7 +230,7 @@
       key: p.id, words: p.words,
       cls: p.stale ? 'stale' : p !== last ? 'old' : p.final ? '' : 'draft',
     }));
-    if (carry && carry.until > performance.now()) segments.push({ key: 'carry', words: carry.words, cls: 'draft' });
+    if (carry && carry.until > performance.now()) segments.push({ key: 'carry', words: carry.words, cls: 'draft', join: true });
     translationPager.render(segments);
     schedulePageTurn();
     // Фразы, целиком ушедшие на прошлые страницы, больше не нужны.
@@ -226,7 +287,7 @@
       clearTimeout(hideTimer);
       hideTimer = setTimeout(hide, HIDE_AFTER_FINAL_MS);
       schedulePageTurn();
-    }, Math.max(PAGE_MIN_MS, translationPager.wordsOnPage() * PAGE_MS_PER_WORD));
+    }, translationPager.turnDelay(PAGE_MS_PER_WORD, PAGE_MIN_MS));
   }
 
   const hide = () => {
