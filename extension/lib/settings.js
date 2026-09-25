@@ -20,6 +20,7 @@ export const DEFAULT_PREFS = {
   ttsProvider: 'browser',  // browser | yandex
   voice: '',
   subtitles: true,
+  subtitlesFinalOnly: false, // в субтитрах только финальный перевод: спокойнее, но на 1–2 с позже
   duck: 0.3,               // громкость оригинала во время озвучки
   endpointing: 300,        // мс тишины, после которых Deepgram закрывает фразу
 };

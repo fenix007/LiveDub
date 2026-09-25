@@ -93,6 +93,7 @@ function syncControls() {
   for (const id of ['source', 'target', 'sttEngine', 'draftEngine', 'finalEngine', 'ttsProvider', 'endpointing']) $(id).value = prefs[id];
   $('tts').checked = prefs.tts;
   $('subtitles').checked = prefs.subtitles;
+  $('subtitlesFinalOnly').checked = prefs.subtitlesFinalOnly;
   $('duck').value = prefs.duck;
   populateVoices();
   $('tts').disabled = !speech.ready();
@@ -161,6 +162,7 @@ $('subtitles').addEventListener('change', () => {
   if (prefs.subtitles) injectSubtitles(session.tabId);
   else sendToTab(session.tabId, { type: 'tt-subtitle-clear' });
 });
+$('subtitlesFinalOnly').addEventListener('change', () => setPref('subtitlesFinalOnly', $('subtitlesFinalOnly').checked));
 $('duck').addEventListener('input', () => setPref('duck', Number($('duck').value)));
 $('endpointing').addEventListener('change', () => setPref('endpointing', Number($('endpointing').value)));
 $('options').addEventListener('click', () => chrome.runtime.openOptionsPage());
@@ -213,6 +215,7 @@ async function sendSubtitle(tabId, message) {
 // original — тот текст, с которого сделан перевод, а не более свежая гипотеза распознавания.
 function showSubtitle(state, translated, final, original = state.finalText || state.sourceText) {
   if (!prefs.subtitles || !session || state.captureGeneration !== captureGeneration) return;
+  if (!final && prefs.subtitlesFinalOnly) return;
   sendSubtitle(session.tabId, { type: 'tt-subtitle', id: state.id, translation: translated, original, final });
 }
 
@@ -221,7 +224,9 @@ function showSubtitle(state, translated, final, original = state.finalText || st
 // в панели и на странице до прихода перевода по новому тексту.
 function markStale(state) {
   const current = state.final ? state.finalText : state.sourceText;
-  const stale = !!state.lastTranslation && !continuesText(current, state.lastSuccessText);
+  // Укороченный текст (фразу разрезали по границе предложения) — не переписанный.
+  const stale = !!state.lastTranslation &&
+    !continuesText(current, state.lastSuccessText) && !continuesText(state.lastSuccessText, current);
   if (stale === state.stale) return;
   state.stale = stale;
   state.row.querySelector('.tr').classList.toggle('stale', stale);
