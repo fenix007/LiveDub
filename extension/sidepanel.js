@@ -577,6 +577,7 @@ function handleDeepgram(msg) {
       else if (text) prefetchFinal(joined);
     } else {
       const stable = stableWords(latestInterim, text);
+      if (text) cancelPauseHold(); // речь возобновилась — фразу закроет следующая пауза
       latestInterim = text;
       updatePhrase(joinText(buffer.join(' '), text), joinText(buffer.join(' '), stable));
     }

@@ -109,9 +109,10 @@
         if (overflow > 0) {
           // Новая страница начинается с начала фразы, если она влезает, иначе с первого
           // нового слова: слова, пришедшие одним куском с переполнением, не должны
-          // пропасть, не показавшись. Без новых слов — с самого не влезшего слова.
+          // пропасть, не показавшись. Без новых слов (повторная отрисовка, другая ширина)
+          // страница не листается: недочитанное покажет turn().
           const fresh = spans.find((s) => s.fresh);
-          const candidates = (fresh ? [{ key: fresh.key, index: 0 }, fresh] : [spans[overflow]])
+          const candidates = (fresh ? [{ key: fresh.key, index: 0 }, fresh] : [])
             .filter((c) => order(c) > order(start) && order(c) <= order(spans[overflow]));
           for (const candidate of candidates) {
             start = { key: candidate.key, index: candidate.index };
@@ -121,10 +122,11 @@
           }
         }
         // Новых слов больше, чем страница: показываем их с первого нового слова,
-        // остальное — следующими страницами через turn().
+        // остальное — следующими страницами через turn(). Если перед новыми словами
+        // ещё есть непоказанные (ждут своей страницы), начало страницы не трогаем.
         if (overflow > 0) {
           const fresh = spans.find((s) => s.fresh);
-          if (fresh && order(fresh) > order(start)) {
+          if (fresh && order(fresh) > order(start) && order(fresh) <= order(spans[overflow])) {
             start = { key: fresh.key, index: fresh.index };
             spans = draw(segments, freshFrom);
             overflow = overflowAt(spans);
@@ -243,11 +245,19 @@
   const apply = ({ id, translation, original, final }) => {
     let phrase = phrases.find((p) => p.id === id);
     if (!phrase) {
-      phrase = { id, words: [], original: '', final: false, stale: false, rewroteAt: 0 };
+      // Фраза старше показанных уже ушла с экрана: её поздний перевод не нужен.
+      if (phrases.some((p) => p.id > id)) return;
+      phrase = { id, words: [], original: '', final: false, stale: false, rewroteAt: -Infinity };
       phrases.push(phrase);
       carry = null;
     }
     if (phrase.final && !final) return; // запоздалый черновик после финала
+    if (phrase !== phrases.at(-1)) {
+      // Поздний перевод уже прочитанной фразы (финал другого движка пришёл после
+      // черновика следующей) сдвинул бы все слова после неё. Оставляем как есть.
+      phrase.final = phrase.final || !!final;
+      return;
+    }
     const next = words(translation);
     let same = 0;
     while (same < phrase.words.length && same < next.length && phrase.words[same] === next[same]) same++;
